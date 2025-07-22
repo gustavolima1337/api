@@ -204,4 +204,13 @@ def create_products(request, products: List[ProductsDetailsIn]):
         ) for p, url in created_products
     ]
 
-
+@api.delete("/products/")
+def remove_all_products(request):
+    try:
+        logger.info("Iniciando exclusão de todos os produtos")
+        count = ProductDetails.objects.all().delete()[0]
+        logger.info(f"{count} produtos excluídos com sucesso")
+        return {"message": f"{count} produtos excluídos com sucesso"}
+    except Exception as e:
+        logger.error(f"Erro ao excluir produtos: {str(e)}")
+        return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
