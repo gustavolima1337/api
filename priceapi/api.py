@@ -135,7 +135,6 @@ def create_products(request, products: List[ProductsDetailsIn]):
                 f"- Preço: R$ {product_data['preco_final']:.2f}\n"
                 f"- Total de mudanças: {product_data.get('change_price', 0)}\n"
                 f"- Marketplace: {product_data['marketplace']}\n"
-                f"- URL: {url}\n"
             )
 
             # Verifica se o produto já existe pelo key_sku
