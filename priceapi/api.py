@@ -26,7 +26,7 @@ class ProductsDetailsIn(ModelSchema):
         model_fields = [
             'ean', 'sku', 'key_sku','loja', 'preco_final', 'data_hora', 'marketplace',
             'key_loja', 'descricao', 'review', 'imagem', 'status',
-            'preco_pricing','url'
+            'preco_pricing','url','marca'
         ]
 
 class ProductDetailsOut(Schema):
@@ -44,6 +44,7 @@ class ProductDetailsOut(Schema):
     status: str
     preco_pricing: Optional[Decimal]
     url: str
+    marca: str
 
 class ProductURLInputSchema(Schema):
     ean_key: str
@@ -204,11 +205,12 @@ def create_products(request, products: List[ProductsDetailsIn]):
             imagem=p.imagem,
             status=p.status,
             preco_pricing=p.preco_pricing,
-            url=url
+            url=url,
+            marca=p.marca
         ) for p, url in created_products
     ]
 
-@api.delete("/delproducts/")
+@api.delete("/products/")
 def remove_all_products(request):
     try:
         logger.info("Iniciando exclusão de todos os produtos")
