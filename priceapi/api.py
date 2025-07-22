@@ -117,7 +117,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
         try:
             product_data = product.dict()
             # Armazenar url para logs e saída, mas não salvar no modelo
-            url = product_data.pop("url", "-")
+            #url = product_data.pop("url", "-")
             # Converter preco_final e preco_pricing para Decimal
             product_data["preco_final"] = Decimal(product_data["preco_final"])
             if product_data["preco_pricing"]:
