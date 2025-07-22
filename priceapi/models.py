@@ -31,6 +31,7 @@ class ProductDetails(models.Model):
     status = models.CharField(max_length=10, choices=[("ativo", "Ativo"), ("inativo", "Inativo")], default="ativo")
     preco_pricing = models.DecimalField(max_digits=10, decimal_places=2, default=0.00, null=True, blank=True)
     url = models.URLField(max_length=255)
+    marca = models.CharField(max_length=100,default="Sem marca")
 
     def __str__(self):
         return f"{self.ean.ean} - {self.descricao[:50]}"
