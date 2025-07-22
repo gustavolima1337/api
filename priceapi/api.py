@@ -204,7 +204,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
         ) for p, url in created_products
     ]
 
-@api.delete("/products/")
+@api.delete("/delproducts/")
 def remove_all_products(request):
     try:
         logger.info("Iniciando exclusão de todos os produtos")
