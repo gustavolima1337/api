@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 api = NinjaAPI()
 
+class ErrorResponse(Schema):
+    detail: str
+    data: Optional[dict] = None
+
 class ProductsDetailsIn(ModelSchema):
     class Config:
         model = ProductDetails
@@ -102,7 +106,7 @@ def get_urls(request):
 def get_products(request):
     return ProductDetails.objects.all()
 
-@api.post("/products", response=List[ProductDetailsOut])
+@api.post("/products", response={200: List[ProductDetailsOut], 422: ErrorResponse})
 def create_products(request, products: List[ProductsDetailsIn]):
     created_products = []
     ean = products[0].ean if products else None  # Assume que todos os produtos têm o mesmo EAN
@@ -116,8 +120,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
     for product in products:
         try:
             product_data = product.dict()
-            # Armazenar url para logs e saída, mas não salvar no modelo
-            #url = product_data.pop("url", "-")
+
             # Converter preco_final e preco_pricing para Decimal
             product_data["preco_final"] = Decimal(product_data["preco_final"])
             if product_data["preco_pricing"]:
@@ -153,7 +156,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
                         f"- Novo preço: R$ {product_data['preco_final']:.2f}\n"
                         f"- Total de mudanças: {product_data['change_price']}\n"
                         f"- Marketplace: {product_data['marketplace']}\n"
-                        f"- URL: {url}\n"
+                        f"- URL: {product_data['url']}\n"  # Use product_data["url"] instead of url
                     )
             else:
                 # Novo produto, inicializa change_price
@@ -167,7 +170,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
                 key_sku=product_data["key_sku"],
                 defaults=product_data
             )
-            created_products.append((new_product, url))
+            created_products.append((new_product, product_data["url"]))  # Store the URL from product_data
         except Exception as e:
             logger.error(f"Erro ao salvar produto {product_data['key_sku']}: {str(e)}")
             return 422, {"detail": f"Erro ao salvar produto: {str(e)}", "data": product_data}
@@ -179,7 +182,9 @@ def create_products(request, products: List[ProductsDetailsIn]):
             existing.status = "inativo"
             existing.data_hora = current_time
             existing.save()
-            url = ProductURL.objects.filter(ean=existing.ean).first().url if ProductURL.objects.filter(ean=existing.ean).exists() else "-"
+            # Retrieve URL from ProductURL or use a default if not found
+            product_url = ProductURL.objects.filter(ean=existing.ean).first()
+            url = product_url.url if product_url else "https://via.placeholder.com/150"
             created_products.append((existing, url))
 
     # Retornar os produtos no formato do schema ProductDetailsOut
