@@ -248,7 +248,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
         ) for p, url in created_products
     ]
 
-@api.get("/price_changes", response=List[PriceChangeOut])
+@api.get("/price_changes/", response=List[PriceChangeOut])
 def get_price_changes(request, ean: Optional[str] = None, loja: Optional[str] = None):
     logger.info(f"Consultando alterações de preço: ean={ean}, loja={loja}")
     queryset = PriceChange.objects.exclude(preco_final_antigo__isnull=True)
