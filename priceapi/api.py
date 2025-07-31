@@ -183,7 +183,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
             else:
                 # Novo produto, inicializa change_price
                 product_data["change_price"] = 0
-                # Registrar o primeiro preço como uma alteração (opcional, pode ser ajustado)
+                # Registrar o primeiro preço como uma alteração
                 PriceChange.objects.create(
                     ean=product_data["ean"],
                     loja=product_data["loja"],
@@ -251,7 +251,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
 @api.get("/price_changes", response=List[PriceChangeOut])
 def get_price_changes(request, ean: Optional[str] = None, loja: Optional[str] = None):
     logger.info(f"Consultando alterações de preço: ean={ean}, loja={loja}")
-    queryset = PriceChange.objects.all()
+    queryset = PriceChange.objects.exclude(preco_final_antigo__isnull=True)
     if ean:
         queryset = queryset.filter(ean=ean)
     if loja:
