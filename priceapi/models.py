@@ -35,3 +35,22 @@ class ProductDetails(models.Model):
 
     def __str__(self):
         return f"{self.ean.ean} - {self.descricao[:50]}"
+
+class PriceChange(models.Model):
+    ean = models.CharField(max_length=13)
+    loja = models.CharField(max_length=100)
+    key_loja = models.CharField(max_length=200)
+    preco_final_antigo = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    preco_final_novo = models.DecimalField(max_digits=10, decimal_places=2)
+    timestamp = models.DateTimeField(default=timezone.now)
+    url = models.URLField(max_length=500)
+    descricao = models.TextField()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['ean', 'loja']),
+            models.Index(fields=['timestamp']),
+        ]
+
+    def __str__(self):
+        return f"{self.ean} - {self.loja} - {self.timestamp}"
