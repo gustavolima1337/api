@@ -84,7 +84,7 @@ class ProductURLInputSchema(Schema):
 class SchemaProductURL(ModelSchema):
     class Config:
         model = ProductURL
-        model_fields = ['ean_key', 'ean', 'brand', 'url', 'client', 'created_at', 'client_name']
+        model_fields = ['ean_key', 'ean', 'brand', 'url', 'client', 'created_at', 'client_name','is_active']
 
 @api.post('urls', response=List[SchemaProductURL])
 def post_urls(request, payload: List[ProductURLInputSchema]):
@@ -280,3 +280,4 @@ def remove_all_products(request):
     except Exception as e:
         logger.error(f"Erro ao excluir produtos: {str(e)}")
         return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
+
