@@ -10,14 +10,14 @@ class ProductURL(models.Model):
     client_name = models.CharField(max_length=100)
     client = models.ForeignKey(User, on_delete=models.CASCADE, related_name='products', null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    is_active = models.BooleanField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
 
     def __str__(self):
         return f"{self.ean} - {self.brand}"
 
 class ProductDetails(models.Model):
     ean = models.CharField(max_length=13)
-    sku = models.CharField(max_length=50)  # Aumentado para 50, igual a ProductDetails
+    sku = models.CharField(max_length=50)
     loja = models.CharField(max_length=75, default="-")
     preco_final = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     data_hora = models.DateTimeField(default=timezone.now)
@@ -34,7 +34,7 @@ class ProductDetails(models.Model):
     marca = models.CharField(max_length=100)
 
     def __str__(self):
-        return f"{self.ean.ean} - {self.descricao[:50]}"
+        return f"{self.ean} - {self.descricao[:50]}"
 
 class PriceChange(models.Model):
     ean = models.CharField(max_length=13)
