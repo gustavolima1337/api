@@ -282,3 +282,13 @@ def remove_all_products(request):
     except Exception as e:
         logger.error(f"Erro ao excluir produtos: {str(e)}")
         return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
+    
+@api.post("/update_is_active", response={200: dict, 500: ErrorResponse})
+def update_is_active(request):
+    try:
+        updated_count = ProductURL.objects.filter(is_active__isnull=True).update(is_active=True)
+        logger.info(f"{updated_count} registros ProductURL atualizados para is_active=True")
+        return {"message": f"{updated_count} registros atualizados para is_active=True"}
+    except Exception as e:
+        logger.error(f"Erro ao atualizar is_active: {str(e)}")
+        return 500, {"detail": f"Erro ao atualizar is_active: {str(e)}"}
