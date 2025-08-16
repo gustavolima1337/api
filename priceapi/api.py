@@ -62,7 +62,7 @@ class ProductURLInputSchema(Schema):
     brand: str
     url: str
     client_name: str
-    is_active: Optional[bool] = True  # Campo booleano com padrão True
+    is_active: Optional[bool] = True
 
     @staticmethod
     def validate_ean(ean: str) -> str:
@@ -82,6 +82,10 @@ class ProductURLInputSchema(Schema):
             raise ValidationError("Brand cannot be empty")
         return brand
 
+class UpdateIsActiveSchema(Schema):
+    ean_key: str
+    is_active: bool
+
 class SchemaProductURL(ModelSchema):
     class Config:
         model = ProductURL
@@ -100,7 +104,7 @@ def post_urls(request, payload: List[ProductURLInputSchema]):
                 url=url_data.url,
                 client_name=url_data.client_name,
                 client=None,
-                is_active=url_data.is_active  # Usar o valor de is_active do payload ou o padrão True
+                is_active=url_data.is_active
             )
             created_products.append(product)
         except IntegrityError as e:
@@ -115,6 +119,34 @@ def post_urls(request, payload: List[ProductURLInputSchema]):
 def get_urls(request):
     return ProductURL.objects.all()
 
+@api.patch('/urls/update_is_active', response={200: List[SchemaProductURL], 422: ErrorResponse})
+def update_is_active(request, payload: List[UpdateIsActiveSchema]):
+    try:
+        logger.info(f"Recebendo {len(payload)} atualizações para is_active")
+        updated_products = []
+        ean_keys = [item.ean_key for item in payload]
+        products = ProductURL.objects.filter(ean_key__in=ean_keys)
+        
+        if not products.exists():
+            logger.warning("Nenhum produto encontrado para os ean_keys fornecidos")
+            return 422, {"detail": "Nenhum produto encontrado para os ean_keys fornecidos"}
+
+        for item in payload:
+            try:
+                product = products.get(ean_key=item.ean_key)
+                product.is_active = item.is_active
+                updated_products.append(product)
+                logger.info(f"Atualizando is_active para {item.is_active} no produto {item.ean_key}")
+            except ProductURL.DoesNotExist:
+                logger.warning(f"Produto com ean_key {item.ean_key} não encontrado")
+                continue
+
+        ProductURL.objects.bulk_update(updated_products, ['is_active'])
+        return updated_products
+    except Exception as e:
+        logger.error(f"Erro ao atualizar is_active: {str(e)}")
+        return 422, {"detail": f"Erro ao atualizar is_active: {str(e)}"}
+
 @api.get('products/', response=List[ProductDetailsOut])
 def get_products(request):
     return ProductDetails.objects.all()
@@ -122,28 +154,21 @@ def get_products(request):
 @api.post("/products", response={200: List[ProductDetailsOut], 422: ErrorResponse})
 def create_products(request, products: List[ProductsDetailsIn]):
     created_products = []
-    ean = products[0].ean if products else None  # Assume que todos os produtos têm o mesmo EAN
-
-    # Obter todos os sellers existentes para o EAN
+    ean = products[0].ean if products else None
     existing_sellers = ProductDetails.objects.filter(ean=ean) if ean else ProductDetails.objects.none()
     existing_keys = {s.key_sku for s in existing_sellers}
     received_keys = {p.key_sku for p in products}
 
-    # Processar produtos recebidos
     for product in products:
         try:
             product_data = product.dict()
-
-            # Converter preco_final e preco_pricing para Decimal
             product_data["preco_final"] = Decimal(product_data["preco_final"])
             if product_data["preco_pricing"]:
                 product_data["preco_pricing"] = Decimal(product_data["preco_pricing"])
             else:
                 product_data["preco_pricing"] = None
-            # Garantir que data_hora seja um objeto datetime
             product_data["data_hora"] = timezone.now()
 
-            # Registrar log informativo para cada produto
             logger.info(
                 f"Processando produto:\n"
                 f"- Seller: {product_data['loja']}\n"
@@ -153,15 +178,11 @@ def create_products(request, products: List[ProductsDetailsIn]):
                 f"- Marketplace: {product_data['marketplace']}\n"
             )
 
-            # Verifica se o produto já existe pelo key_sku
             existing_product = ProductDetails.objects.filter(key_sku=product_data["key_sku"]).first()
             if existing_product:
-                # Preserva o change_price atual
                 product_data["change_price"] = existing_product.change_price
-                # Verifica mudança de preço com arredondamento para duas casas decimais
                 if round(existing_product.preco_final, 2) != round(product_data["preco_final"], 2):
                     product_data["change_price"] += 1
-                    # Registrar a alteração no modelo PriceChange
                     PriceChange.objects.create(
                         ean=product_data["ean"],
                         loja=product_data["loja"],
@@ -183,9 +204,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
                         f"- URL: {product_data['url']}\n"
                     )
             else:
-                # Novo produto, inicializa change_price
                 product_data["change_price"] = 0
-                # Registrar o primeiro preço como uma alteração
                 PriceChange.objects.create(
                     ean=product_data["ean"],
                     loja=product_data["loja"],
@@ -204,10 +223,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
                     f"- URL: {product_data['url']}\n"
                 )
 
-            # Define status como ativo
             product_data["status"] = "ativo"
-
-            # Cria ou atualiza o produto
             new_product, created = ProductDetails.objects.update_or_create(
                 key_sku=product_data["key_sku"],
                 defaults=product_data
@@ -217,7 +233,6 @@ def create_products(request, products: List[ProductsDetailsIn]):
             logger.error(f"Erro ao salvar produto {product_data['key_sku']}: {str(e)}")
             return 422, {"detail": f"Erro ao salvar produto: {str(e)}", "data": product_data}
 
-    # Marcar sellers ausentes como inativo
     current_time = timezone.now()
     for existing in existing_sellers:
         if existing.key_sku not in received_keys:
@@ -228,7 +243,6 @@ def create_products(request, products: List[ProductsDetailsIn]):
             url = product_url.url if product_url else "https://via.placeholder.com/150"
             created_products.append((existing, url))
 
-    # Retornar os produtos no formato do schema ProductDetailsOut
     return [
         ProductDetailsOut(
             ean=p.ean,
@@ -282,13 +296,3 @@ def remove_all_products(request):
     except Exception as e:
         logger.error(f"Erro ao excluir produtos: {str(e)}")
         return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
-    
-@api.post("/update_is_active", response={200: dict, 500: ErrorResponse})
-def update_is_active(request):
-    try:
-        updated_count = ProductURL.objects.filter(is_active__isnull=True).update(is_active=True)
-        logger.info(f"{updated_count} registros ProductURL atualizados para is_active=True")
-        return {"message": f"{updated_count} registros atualizados para is_active=True"}
-    except Exception as e:
-        logger.error(f"Erro ao atualizar is_active: {str(e)}")
-        return 500, {"detail": f"Erro ao atualizar is_active: {str(e)}"}
