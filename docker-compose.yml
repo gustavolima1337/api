@@ -10,3 +10,9 @@ services:
       - .:/app
     environment:
       - DEBUG=1
+    networks:
+      - pricetrack_network
+
+networks:
+  pricetrack_network:
+    external: true

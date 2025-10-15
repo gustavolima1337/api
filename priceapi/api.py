@@ -9,6 +9,7 @@ from django.core.exceptions import ObjectDoesNotExist
 from decimal import Decimal
 from datetime import datetime
 from django.utils import timezone
+from django.shortcuts import get_object_or_404
 
 # Configura o logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -296,3 +297,36 @@ def remove_all_products(request):
     except Exception as e:
         logger.error(f"Erro ao excluir produtos: {str(e)}")
         return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
+
+@api.delete("/urls/{ean_key}", response={200: dict, 404: ErrorResponse, 500: ErrorResponse})
+def remove_url(request, ean_key: str):
+    """
+    Deleta uma URL específica pelo ean_key
+    """
+    try:
+        logger.info(f"Tentando excluir URL com ean_key: {ean_key}")
+        
+        # Busca o objeto ou retorna 404
+        try:
+            url_obj = ProductURL.objects.get(ean_key=ean_key)
+        except ProductURL.DoesNotExist:
+            logger.warning(f"URL com ean_key {ean_key} não encontrada")
+            return 404, {"detail": f"URL com ean_key '{ean_key}' não encontrada"}
+        
+        url_value = url_obj.url
+        ean = url_obj.ean
+        
+        # Deleta o objeto
+        url_obj.delete()
+        
+        logger.info(f"URL excluída com sucesso - EAN: {ean}, URL: {url_value}")
+        return 200, {
+            "message": "URL excluída com sucesso",
+            "ean_key": ean_key,
+            "ean": ean,
+            "url": url_value
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao excluir URL com ean_key {ean_key}: {str(e)}")
+        return 500, {"detail": f"Erro ao excluir URL: {str(e)}"}

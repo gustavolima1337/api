@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Instala dependências
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 # Copia o restante do projeto
 COPY . .
