@@ -1,4 +1,4 @@
-version: '3.8'
+version: "3.8"
 
 services:
   web:
@@ -10,9 +10,12 @@ services:
       - .:/app
     environment:
       - DEBUG=1
-    networks:
-      - pricetrack_network
 
-networks:
-  pricetrack_network:
-    external: true
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger-pricetrack
+    ports:
+      - "16686:16686"   # UI
+      - "4317:4317"     # OTLP gRPC
+      - "4318:4318"     # OTLP HTTP
+
