@@ -40,6 +40,7 @@ class ProductDetailsOut(Schema):
     marketplace: str
     change_price: int
     key_loja: str
+    key_sku: str
     descricao: str
     review: float
     imagem: str
@@ -94,6 +95,24 @@ class SchemaProductURL(ModelSchema):
     class Config:
         model = ProductURL
         model_fields = ['ean_key', 'ean', 'brand', 'url', 'client', 'created_at', 'client_name', 'is_active']
+
+class UpdatePrecosSchema(Schema):
+    key_sku: str
+    preco_pricing: Optional[Decimal] = None
+    preco_buybox: Optional[Decimal] = None
+    
+    def validate(self):
+        """Valida que pelo menos um preço foi fornecido"""
+        if self.preco_pricing is None and self.preco_buybox is None:
+            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
+        
+        if self.preco_pricing is not None and self.preco_pricing < 0:
+            raise ValidationError("preco_pricing não pode ser negativo")
+        
+        if self.preco_buybox is not None and self.preco_buybox < 0:
+            raise ValidationError("preco_buybox não pode ser negativo")
+        
+        return self
 
 @api.post('urls', response=List[SchemaProductURL])
 def post_urls(request, payload: List[ProductURLInputSchema]):
@@ -371,3 +390,137 @@ def remove_url(request, ean_key: str):
     except Exception as e:
         logger.error(f"Erro ao excluir URL com ean_key {ean_key}: {str(e)}")
         return 500, {"detail": f"Erro ao excluir URL: {str(e)}"}
+
+
+
+class UpdatePrecosSchema(Schema):
+    key_sku: str
+    preco_pricing: Optional[Decimal] = None
+    preco_buybox: Optional[Decimal] = None
+    
+    def validate(self):
+        """Valida que pelo menos um preço foi fornecido"""
+        if self.preco_pricing is None and self.preco_buybox is None:
+            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
+        
+        if self.preco_pricing is not None and self.preco_pricing < 0:
+            raise ValidationError("preco_pricing não pode ser negativo")
+        
+        if self.preco_buybox is not None and self.preco_buybox < 0:
+            raise ValidationError("preco_buybox não pode ser negativo")
+        
+        return self
+
+@api.patch('/products/update_precos', response={200: List[ProductDetailsOut], 404: ErrorResponse, 422: ErrorResponse})
+def update_precos(request, payload: List[UpdatePrecosSchema]):
+    """
+    Atualiza preco_pricing e/ou preco_buybox de um ou mais produtos
+    """
+    try:
+        logger.info(f"Recebendo {len(payload)} atualizações de preços")
+        updated_products = []
+        key_skus = [item.key_sku for item in payload]
+        
+        # Busca todos os produtos de uma vez
+        products = ProductDetails.objects.filter(key_sku__in=key_skus)
+        
+        if not products.exists():
+            logger.warning("Nenhum produto encontrado para os key_sku fornecidos")
+            return 404, {"detail": "Nenhum produto encontrado"}
+        
+        # Cria um dicionário para acesso rápido
+        products_dict = {p.key_sku: p for p in products}
+        
+        for item in payload:
+            # Valida o schema
+            try:
+                item.validate()
+            except ValidationError as e:
+                return 422, {"detail": str(e)}
+            
+            if item.key_sku not in products_dict:
+                logger.warning(f"Produto {item.key_sku} não encontrado")
+                continue
+            
+            product = products_dict[item.key_sku]
+            campos_atualizados = []
+            
+            # Atualiza preco_pricing se fornecido
+            if item.preco_pricing is not None:
+                # Validação: preço mínimo não pode ser maior que preço final
+                if item.preco_pricing > product.preco_final:
+                    logger.warning(
+                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_final "
+                        f"(R$ {product.preco_final:.2f}) para {item.key_sku}"
+                    )
+                    return 422, {
+                        "detail": "preco_pricing não pode ser maior que preco_final",
+                        "data": {
+                            "key_sku": item.key_sku,
+                            "preco_pricing_enviado": float(item.preco_pricing),
+                            "preco_final_atual": float(product.preco_final)
+                        }
+                    }
+                
+                product.preco_pricing = item.preco_pricing
+                campos_atualizados.append(f"preco_pricing: R$ {item.preco_pricing:.2f}")
+            
+            # Atualiza preco_buybox se fornecido
+            if item.preco_buybox is not None:
+                product.preco_buybox = item.preco_buybox
+                campos_atualizados.append(f"preco_buybox: R$ {item.preco_buybox:.2f}")
+            
+            updated_products.append(product)
+            
+            logger.info(
+                f"Atualizando preços:\n"
+                f"- Key SKU: {item.key_sku}\n"
+                f"- Loja: {product.loja}\n"
+                f"- Produto: {product.descricao[:50]}\n"
+                f"- Preço Final: R$ {product.preco_final:.2f}\n"
+                f"- Campos atualizados: {', '.join(campos_atualizados)}\n"
+            )
+        
+        # Determina quais campos atualizar
+        fields_to_update = []
+        if any(item.preco_pricing is not None for item in payload):
+            fields_to_update.append('preco_pricing')
+        if any(item.preco_buybox is not None for item in payload):
+            fields_to_update.append('preco_buybox')
+        
+        # Atualiza todos de uma vez
+        ProductDetails.objects.bulk_update(updated_products, fields_to_update)
+        
+        logger.info(f"{len(updated_products)} produtos atualizados com sucesso")
+        
+        # Busca URLs para retornar na resposta
+        result = []
+        for product in updated_products:
+            product_url = ProductURL.objects.filter(ean=product.ean).first()
+            url = product_url.url if product_url else "https://via.placeholder.com/150"
+            
+            result.append(ProductDetailsOut(
+                ean=product.ean,
+                sku=product.sku,
+                loja=product.loja,
+                preco_final=product.preco_final,
+                data_hora=product.data_hora,
+                marketplace=product.marketplace,
+                change_price=product.change_price,
+                key_loja=product.key_loja,
+                descricao=product.descricao,
+                review=product.review,
+                imagem=product.imagem,
+                status=product.status,
+                preco_pricing=product.preco_pricing,
+                preco_buybox=product.preco_buybox,
+                url=url,
+                marca=product.marca,
+                categoria=product.categoria
+            ))
+        
+        return 200, result
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar preços: {str(e)}")
+        return 422, {"detail": f"Erro ao atualizar preços: {str(e)}"}
