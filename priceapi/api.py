@@ -27,7 +27,8 @@ class ProductsDetailsIn(ModelSchema):
         model_fields = [
             'ean', 'sku', 'key_sku', 'loja', 'preco_final', 'data_hora', 'marketplace',
             'key_loja', 'descricao', 'review', 'imagem', 'status',
-            'preco_pricing', 'url', 'marca','categoria'
+            'preco_pricing', 'preco_buybox', 'url', 'marca','categoria'
+
         ]
 
 class ProductDetailsOut(Schema):
@@ -44,6 +45,7 @@ class ProductDetailsOut(Schema):
     imagem: str
     status: str
     preco_pricing: Optional[Decimal]
+    preco_buybox: Optional[Decimal]
     url: str
     marca: str
     categoria: str
@@ -297,6 +299,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
             imagem=p.imagem,
             status=p.status,
             preco_pricing=p.preco_pricing,
+            preco_buybox=p.preco_buybox,
             url=url,
             marca=p.marca,
             categoria=p.categoria
