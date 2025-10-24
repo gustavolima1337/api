@@ -445,23 +445,59 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
             product = products_dict[item.key_sku]
             campos_atualizados = []
             
-            # Atualiza preco_pricing se fornecido
-            if item.preco_pricing is not None:
-                # Validação: preço mínimo não pode ser maior que preço final
-                if item.preco_pricing > product.preco_final:
+            # ✅ CORREÇÃO: Validação entre preco_pricing e preco_buybox
+            # Regra: preco_pricing (mínimo) NÃO pode ser maior que preco_buybox (seu preço)
+            if item.preco_pricing is not None and item.preco_buybox is not None:
+                if item.preco_pricing > item.preco_buybox:
                     logger.warning(
-                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_final "
-                        f"(R$ {product.preco_final:.2f}) para {item.key_sku}"
+                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_buybox "
+                        f"(R$ {item.preco_buybox:.2f}) para {item.key_sku}"
                     )
                     return 422, {
-                        "detail": "preco_pricing não pode ser maior que preco_final",
+                        "detail": "preco_pricing não pode ser maior que preco_buybox",
                         "data": {
                             "key_sku": item.key_sku,
                             "preco_pricing_enviado": float(item.preco_pricing),
-                            "preco_final_atual": float(product.preco_final)
+                            "preco_buybox_enviado": float(item.preco_buybox)
                         }
                     }
-                
+            
+            # Validação quando apenas preco_pricing é atualizado
+            elif item.preco_pricing is not None and item.preco_buybox is None:
+                # Verifica contra o preco_buybox existente no banco
+                if product.preco_buybox and item.preco_pricing > product.preco_buybox:
+                    logger.warning(
+                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_buybox atual "
+                        f"(R$ {product.preco_buybox:.2f}) para {item.key_sku}"
+                    )
+                    return 422, {
+                        "detail": "preco_pricing não pode ser maior que preco_buybox atual",
+                        "data": {
+                            "key_sku": item.key_sku,
+                            "preco_pricing_enviado": float(item.preco_pricing),
+                            "preco_buybox_atual": float(product.preco_buybox)
+                        }
+                    }
+            
+            # Validação quando apenas preco_buybox é atualizado
+            elif item.preco_buybox is not None and item.preco_pricing is None:
+                # Verifica contra o preco_pricing existente no banco
+                if product.preco_pricing and product.preco_pricing > item.preco_buybox:
+                    logger.warning(
+                        f"preco_pricing atual (R$ {product.preco_pricing:.2f}) maior que preco_buybox novo "
+                        f"(R$ {item.preco_buybox:.2f}) para {item.key_sku}"
+                    )
+                    return 422, {
+                        "detail": "preco_buybox não pode ser menor que preco_pricing atual",
+                        "data": {
+                            "key_sku": item.key_sku,
+                            "preco_pricing_atual": float(product.preco_pricing),
+                            "preco_buybox_enviado": float(item.preco_buybox)
+                        }
+                    }
+            
+            # Atualiza preco_pricing se fornecido
+            if item.preco_pricing is not None:
                 product.preco_pricing = item.preco_pricing
                 campos_atualizados.append(f"preco_pricing: R$ {item.preco_pricing:.2f}")
             
@@ -477,7 +513,7 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
                 f"- Key SKU: {item.key_sku}\n"
                 f"- Loja: {product.loja}\n"
                 f"- Produto: {product.descricao[:50]}\n"
-                f"- Preço Final: R$ {product.preco_final:.2f}\n"
+                f"- Preço Final (mercado): R$ {product.preco_final:.2f}\n"
                 f"- Campos atualizados: {', '.join(campos_atualizados)}\n"
             )
         
@@ -502,9 +538,9 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
             result.append(ProductDetailsOut(
                 ean=product.ean,
                 sku=product.sku,
+                key_sku=product.key_sku,
                 loja=product.loja,
                 preco_final=product.preco_final,
-                key_sku=product.key_sku,
                 data_hora=product.data_hora,
                 marketplace=product.marketplace,
                 change_price=product.change_price,
