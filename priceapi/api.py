@@ -156,11 +156,30 @@ def get_products(request):
 @api.post("/products", response={200: List[ProductDetailsOut], 422: ErrorResponse})
 def create_products(request, products: List[ProductsDetailsIn]):
     created_products = []
-    ean = products[0].ean if products else None
-    existing_sellers = ProductDetails.objects.filter(ean=ean) if ean else ProductDetails.objects.none()
+    
+    if not products:
+        logger.warning("Lista de produtos vazia recebida")
+        return []
+    
+    ean = products[0].ean
+    marketplace = products[0].marketplace
+    
+    logger.info(f"Processando {len(products)} produtos - EAN: {ean}, Marketplace: {marketplace}")
+    
+    # ✅ CORREÇÃO: Buscar produtos existentes APENAS do mesmo EAN + MARKETPLACE
+    existing_sellers = ProductDetails.objects.filter(
+        ean=ean,
+        marketplace=marketplace
+    )
     existing_keys = {s.key_sku for s in existing_sellers}
     received_keys = {p.key_sku for p in products}
+    
+    logger.info(f"Produtos existentes no banco: {len(existing_keys)}")
+    logger.info(f"Produtos recebidos na raspagem: {len(received_keys)}")
+    logger.info(f"Keys existentes: {existing_keys}")
+    logger.info(f"Keys recebidas: {received_keys}")
 
+    # Processar produtos recebidos
     for product in products:
         try:
             product_data = product.dict()
@@ -174,9 +193,9 @@ def create_products(request, products: List[ProductsDetailsIn]):
             logger.info(
                 f"Processando produto:\n"
                 f"- Seller: {product_data['loja']}\n"
-                f"- Produto EAN: {product_data['ean']}\n"
+                f"- EAN: {product_data['ean']}\n"
+                f"- Key SKU: {product_data['key_sku']}\n"
                 f"- Preço: R$ {product_data['preco_final']:.2f}\n"
-                f"- Total de mudanças: {product_data.get('change_price', 0)}\n"
                 f"- Marketplace: {product_data['marketplace']}\n"
             )
 
@@ -221,6 +240,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
                     f"Primeiro preço registrado para novo produto:\n"
                     f"- Seller: {product_data['loja']}\n"
                     f"- Produto EAN: {product_data['ean']}\n"
+                    f"- Key SKU: {product_data['key_sku']}\n"
                     f"- Preço: R$ {product_data['preco_final']:.2f}\n"
                     f"- URL: {product_data['url']}\n"
                 )
@@ -232,18 +252,34 @@ def create_products(request, products: List[ProductsDetailsIn]):
             )
             created_products.append((new_product, product_data["url"]))
         except Exception as e:
-            logger.error(f"Erro ao salvar produto {product_data['key_sku']}: {str(e)}")
+            logger.error(f"Erro ao salvar produto {product_data.get('key_sku', 'N/A')}: {str(e)}")
             return 422, {"detail": f"Erro ao salvar produto: {str(e)}", "data": product_data}
 
+    # ✅ CORREÇÃO: Inativar APENAS produtos do MESMO marketplace que não vieram na raspagem
     current_time = timezone.now()
+    inactivated_count = 0
+    
     for existing in existing_sellers:
         if existing.key_sku not in received_keys:
             existing.status = "inativo"
             existing.data_hora = current_time
             existing.save()
+            
             product_url = ProductURL.objects.filter(ean=existing.ean).first()
             url = product_url.url if product_url else "https://via.placeholder.com/150"
             created_products.append((existing, url))
+            inactivated_count += 1
+            
+            logger.info(
+                f"Produto inativado (não retornou na raspagem):\n"
+                f"- Seller: {existing.loja}\n"
+                f"- EAN: {existing.ean}\n"
+                f"- Key SKU: {existing.key_sku}\n"
+                f"- Marketplace: {existing.marketplace}\n"
+                f"- Status: inativo\n"
+            )
+    
+    logger.info(f"Resumo: {len(products)} ativos, {inactivated_count} inativados")
 
     return [
         ProductDetailsOut(
