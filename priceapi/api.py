@@ -504,6 +504,7 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
                 sku=product.sku,
                 loja=product.loja,
                 preco_final=product.preco_final,
+                key_sku=product.key_sku,
                 data_hora=product.data_hora,
                 marketplace=product.marketplace,
                 change_price=product.change_price,
