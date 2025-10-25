@@ -12,20 +12,9 @@ services:
       - DEBUG=1
     networks:
       - pricetrack_network
-    depends_on:
-      - jaeger
-
-  jaeger:
-    image: jaegertracing/all-in-one:latest
-    container_name: jaeger-isolado
-    ports:
-      - "16686:16686"   # UI: http://localhost:16686
-      - "4317:4317"     # OTLP gRPC
-      - "4318:4318"     # OTLP HTTP
-    networks:
-      - pricetrack_network
 
 networks:
   pricetrack_network:
-    driver: bridge
-    # Removido 'external: true' para criar a rede automaticamente
+    external: true
+
+
