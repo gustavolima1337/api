@@ -561,7 +561,7 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
         return 422, {"detail": f"Erro ao atualizar preços: {str(e)}"}
     
 
-@api.get("/products/by_ean/{ean}", response=List[ProductDetailsOut])
+@api.get("/products/{ean}", response=List[ProductDetailsOut])
 def get_product_by_ean(request, ean: str):
     """
     Busca APENAS produtos ATIVOS de um ÚNICO EAN.
