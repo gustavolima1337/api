@@ -391,8 +391,6 @@ def remove_url(request, ean_key: str):
         logger.error(f"Erro ao excluir URL com ean_key {ean_key}: {str(e)}")
         return 500, {"detail": f"Erro ao excluir URL: {str(e)}"}
 
-
-
 class UpdatePrecosSchema(Schema):
     key_sku: str
     preco_pricing: Optional[Decimal] = None
@@ -561,3 +559,60 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
     except Exception as e:
         logger.error(f"Erro ao atualizar preços: {str(e)}")
         return 422, {"detail": f"Erro ao atualizar preços: {str(e)}"}
+    
+
+@api.get("/products/by_ean/{ean}", response=List[ProductDetailsOut])
+def get_product_by_ean(request, ean: str):
+    """
+    Busca APENAS produtos ATIVOS de um ÚNICO EAN.
+    
+    Exemplo: /api/products/by_ean/7891234567890
+    """
+    # Validação rigorosa do EAN
+    if not ean.isdigit() or len(ean) != 13:
+        logger.warning(f"EAN inválido recebido: {ean}")
+        return 422, {"detail": "EAN deve ter exatamente 13 dígitos numéricos"}
+
+    logger.info(f"Consulta de produtos ATIVOS para o EAN: {ean}")
+
+    # ✅ FILTRA APENAS PRODUTOS COM status="ativo"
+    queryset = ProductDetails.objects.filter(
+        ean=ean,
+        status="ativo"  # <--- AQUI O FILTRO PRINCIPAL
+    ).order_by('-data_hora')
+
+    if not queryset.exists():
+        logger.info(f"Nenhum produto ATIVO encontrado para o EAN: {ean}")
+        return 404, {"detail": f"Nenhum produto ativo encontrado para o EAN {ean}"}
+
+    results = []
+    for product in queryset:
+        # URL principal do produto (do ProductURL)
+        product_url_obj = ProductURL.objects.filter(ean=ean).first()
+        url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
+
+        results.append(
+            ProductDetailsOut(
+                ean=product.ean,
+                sku=product.sku,
+                loja=product.loja,
+                preco_final=product.preco_final,
+                data_hora=product.data_hora,
+                marketplace=product.marketplace,
+                change_price=product.change_price,
+                key_loja=product.key_loja,
+                key_sku=product.key_sku,
+                descricao=product.descricao,
+                review=product.review,
+                imagem=product.imagem,
+                status=product.status,  # sempre será "ativo"
+                preco_pricing=product.preco_pricing,
+                preco_buybox=product.preco_buybox,
+                url=url,
+                marca=product.marca,
+                categoria=product.categoria
+            )
+        )
+
+    logger.info(f"Retornando {len(results)} produto(s) ATIVO(S) para o EAN {ean}")
+    return results
