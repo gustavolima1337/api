@@ -1,35 +1,22 @@
 import logging
 from ninja import NinjaAPI, ModelSchema, Schema
-from typing import List, Optional
+from typing import List, Optional, Any, Dict
 from .models import ProductURL, ProductDetails, PriceChange
 from ninja.errors import ValidationError
 from django.db import IntegrityError
-from django.http import HttpResponse
-from django.core.exceptions import ObjectDoesNotExist
 from decimal import Decimal
 from datetime import datetime
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
+from collections import defaultdict
+from django.db.models import Q
+import re
 
 # Configura o logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 api = NinjaAPI()
-
-class ErrorResponse(Schema):
-    detail: str
-    data: Optional[dict] = None
-
-class ProductsDetailsIn(ModelSchema):
-    class Config:
-        model = ProductDetails
-        model_fields = [
-            'ean', 'sku', 'key_sku', 'loja', 'preco_final', 'data_hora', 'marketplace',
-            'key_loja', 'descricao', 'review', 'imagem', 'status',
-            'preco_pricing', 'preco_buybox', 'url', 'marca','categoria'
-
-        ]
 
 class ProductDetailsOut(Schema):
     ean: str
@@ -50,6 +37,380 @@ class ProductDetailsOut(Schema):
     url: str
     marca: str
     categoria: str
+    loja_normalizada: str
+
+# api.py
+from ninja import NinjaAPI, Schema
+from typing import List, Optional, Dict
+from .models import ProductDetails
+from collections import defaultdict
+import logging
+
+logger = logging.getLogger(__name__)
+
+# =================== NINJA API ===================
+api = NinjaAPI(
+    title="PriceTrack - Buy Box Analyzer",
+    version="2.0.0",
+    description="Análise de Buy Box por seller com campos de marketplaces ganhando/perdendo"
+)
+
+# =================== SCHEMAS ===================
+class ProdutoBuyboxSchema(Schema):
+    ean: str
+    descricao: str
+    url: str
+    marketplace: str
+    preco_final: float
+    menor_preco: Optional[float] = None
+    vencedor: Optional[str] = None
+    diferenca: Optional[float] = None
+
+class BuyboxSellerResponse(Schema):
+    seller: str
+    marketplaces: List[str]
+    ganhos: int
+    perdas: int
+    resumo_por_marketplace: Dict[str, Dict[str, int]]  # 👈 adicione isso
+    produtos_ganhando: List[ProdutoBuyboxSchema]
+    produtos_perdendo: List[ProdutoBuyboxSchema]
+    
+
+class ErrorResponse(Schema):
+    detail: str
+
+# =================== FUNÇÃO PRINCIPAL ===================
+def get_buyboxes_by_seller(seller_name: str) -> Dict:
+    """
+    Calcula Buy Box para um seller usando campo `loja_normalizada`.
+    Mostra marketplaces onde está ganhando/perdendo e a diferença
+    para o segundo lugar quando está ganhando.
+    """
+
+    # 1️⃣ Busca produtos ATIVOS do seller
+    seller_products = list(
+        ProductDetails.objects.filter(
+            status="ativo",
+            loja_normalizada=seller_name
+        ).select_related()
+    )
+
+    if not seller_products:
+        return {
+            "seller": seller_name,
+            "mensagem": "Seller não encontrado ou sem produtos ativos",
+            "marketplaces": [],
+            "marketplaces_ganhando": [],
+            "marketplaces_perdendo": [],
+            "ganhos": 0,
+            "perdas": 0,
+            "resumo_por_marketplace": {},
+            "produtos_ganhando": [],
+            "produtos_perdendo": []
+        }
+
+    # 2️⃣ Coleta EANs
+    eans = {p.ean for p in seller_products}
+
+    # 3️⃣ Busca todos os produtos ativos desses EANs
+    all_products = list(
+        ProductDetails.objects.filter(
+            status="ativo",
+            ean__in=eans
+        )
+    )
+
+    # 4️⃣ Agrupa por (EAN, marketplace)
+    grupos = defaultdict(list)
+    for p in all_products:
+        key = (p.ean, p.marketplace)
+        grupos[key].append({
+            'loja': p.loja,
+            'loja_normalizada': p.loja_normalizada,
+            'preco_final': float(p.preco_final),
+            'preco_buybox': float(p.preco_buybox) if p.preco_buybox else 0.0,
+            'url': p.url,
+            'descricao': p.descricao,
+            'marketplace': p.marketplace,
+            'ean': p.ean
+        })
+
+    # 5️⃣ Analisa cada grupo
+    ganhando = []
+    perdendo = []
+    marketplaces = set()
+    marketplaces_ganhando = set()
+    marketplaces_perdendo = set()
+    resumo_por_marketplace = defaultdict(lambda: {"ganhos": 0, "perdas": 0})
+
+    for (ean, marketplace), itens in grupos.items():
+        marketplaces.add(marketplace)
+        validos = [i for i in itens if i['preco_final'] > 0]
+        if not validos:
+            continue
+
+        # Ordena por preço crescente
+        validos_ordenados = sorted(validos, key=lambda x: x['preco_final'])
+
+        vencedor = validos_ordenados[0]
+        min_preco = vencedor['preco_final']
+
+        # Segundo menor preço
+        segundo = validos_ordenados[1] if len(validos_ordenados) > 1 else None
+        segundo_preco = segundo['preco_final'] if segundo else None
+
+        meus_itens = [i for i in validos if i['loja_normalizada'] == seller_name]
+        for meu in meus_itens:
+            info_base = {
+                "ean": ean,
+                "descricao": meu['descricao'][:100],
+                "url": meu['url'],
+                "marketplace": marketplace,
+                "preco_final": meu['preco_final']
+            }
+
+            # 🟢 Ganhando a BuyBox
+            if abs(meu['preco_final'] - min_preco) < 0.01:
+                diferenca_segundo = None
+                vantagem_percentual = None
+                if segundo_preco:
+                    diferenca_segundo = round(segundo_preco - meu['preco_final'], 2)
+                    vantagem_percentual = round((diferenca_segundo / segundo_preco) * 100, 2)
+
+                ganhando.append({
+                    **info_base,
+                    "menor_preco": segundo_preco,
+                    "vencedor": meu['loja'],
+                    "diferenca": diferenca_segundo,
+                    "vantagem_percentual": vantagem_percentual
+                })
+                marketplaces_ganhando.add(marketplace)
+                resumo_por_marketplace[marketplace]["ganhos"] += 1
+
+            # 🔴 Perdendo a BuyBox
+            else:
+                diferenca = round(meu['preco_final'] - min_preco, 2)
+                perdendo.append({
+                    **info_base,
+                    "menor_preco": min_preco,
+                    "vencedor": vencedor['loja'],
+                    "diferenca": diferenca
+                })
+                marketplaces_perdendo.add(marketplace)
+                resumo_por_marketplace[marketplace]["perdas"] += 1
+
+    # 6️⃣ Monta resposta
+    return {
+        "seller": seller_name,
+        "marketplaces": sorted(marketplaces),
+        "marketplaces_ganhando": sorted(marketplaces_ganhando),
+        "marketplaces_perdendo": sorted(marketplaces_perdendo),
+        "ganhos": len(ganhando),
+        "perdas": len(perdendo),
+        "resumo_por_marketplace": dict(resumo_por_marketplace),
+        "produtos_ganhando": ganhando,
+        "produtos_perdendo": perdendo
+    }
+# =================== ENDPOINT NINJA ===================
+@api.get("/buyboxes/{seller_name}",
+    response={200: BuyboxSellerResponse, 404: ErrorResponse}
+)
+def api_get_buyboxes(request, seller_name: str):
+    """
+    Retorna Buy Box por seller (usando loja_normalizada).
+    Ex: /api/buyboxes/seller/hairpro
+    """
+    try:
+        resultado = get_buyboxes_by_seller(seller_name)
+
+        if "mensagem" in resultado:
+            return 404, {"detail": resultado["mensagem"]}
+
+        return 200, resultado
+
+    except Exception as e:
+        logger.error(f"Erro no endpoint: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return 404, {"detail": "Erro interno no servidor"}
+
+def identificar_seller_mais_buyboxes(produtos=None, usar_banco=True):
+    """
+    Identifica o seller (loja) que mais está ganhando buyboxes.
+    
+    Args:
+        produtos: Lista opcional de produtos (ProductDetails ou dicts)
+        usar_banco: Se True, busca produtos do banco. Se False, usa a lista fornecida
+    
+    Returns:
+        dict com informações sobre o seller com mais buyboxes e estatísticas
+    """
+    if usar_banco:
+        # Busca produtos ativos do banco
+        produtos_queryset = ProductDetails.objects.filter(status="ativo")
+        produtos = list(produtos_queryset)
+        logger.info(f"Analisando {len(produtos)} produtos do banco de dados")
+    else:
+        if not produtos:
+            return {
+                "erro": "Lista de produtos vazia",
+                "seller_mais_buyboxes": None,
+                "total_buyboxes": 0,
+                "estatisticas": {}
+            }
+        logger.info(f"Analisando {len(produtos)} produtos fornecidos")
+    
+    # Agrupa produtos por EAN
+    produtos_por_ean = defaultdict(list)
+    
+    for produto in produtos:
+        # Se for um objeto do modelo, converte para dict
+        if hasattr(produto, 'ean'):
+            ean = produto.ean
+            loja = produto.loja
+            key_loja = produto.key_loja
+            preco_final = float(produto.preco_final)
+            preco_buybox = float(produto.preco_buybox) if produto.preco_buybox else 0.0
+            marketplace = produto.marketplace
+            status = produto.status
+            url = produto.url
+            descricao = produto.descricao
+            sku = produto.sku
+        else:
+            # Se for dict
+            ean = produto.get('ean')
+            loja = produto.get('loja')
+            key_loja = produto.get('key_loja')
+            preco_final = float(produto.get('preco_final', 0))
+            preco_buybox_str = produto.get('preco_buybox')
+            if preco_buybox_str:
+                preco_buybox = float(preco_buybox_str) if preco_buybox_str != "0.00" else 0.0
+            else:
+                preco_buybox = 0.0
+            marketplace = produto.get('marketplace')
+            status = produto.get('status', 'ativo')
+            url = produto.get('url', '')
+            descricao = produto.get('descricao', '')
+            sku = produto.get('sku', '')
+        
+        # Considera apenas produtos ativos
+        if status != 'ativo':
+            continue
+            
+        produtos_por_ean[ean].append({
+            'loja': loja,
+            'key_loja': key_loja,
+            'preco_final': preco_final,
+            'preco_buybox': preco_buybox,
+            'marketplace': marketplace,
+            'ean': ean,
+            'url': url,
+            'descricao': descricao,
+            'sku': sku
+        })
+    
+    # Contador de buyboxes por seller
+    buyboxes_por_seller = defaultdict(lambda: {
+        'total_buyboxes': 0,
+        'loja': '',
+        'key_loja': '',
+        'marketplaces': set(),
+        'produtos': []  # Lista de produtos com informações detalhadas
+    })
+    
+    # Para cada EAN, identifica o seller que ganhou o buybox
+    for ean, produtos_ean in produtos_por_ean.items():
+        buybox_winner = None
+        menor_preco = float('inf')
+        
+        # Verifica se algum produto tem preco_buybox > 0 (marcado explicitamente)
+        produtos_com_buybox = [p for p in produtos_ean if p['preco_buybox'] > 0]
+        
+        if produtos_com_buybox:
+            # Se há produtos com preco_buybox > 0, o buybox winner é aquele
+            # Pega o produto com menor preco_final entre os que têm buybox
+            buybox_winner = min(produtos_com_buybox, key=lambda x: x['preco_final'])
+        else:
+            # Caso contrário, o buybox winner é o seller com menor preço
+            if produtos_ean:
+                buybox_winner = min(produtos_ean, key=lambda x: x['preco_final'])
+        
+        if buybox_winner:
+            loja = buybox_winner['loja']
+            key_loja = buybox_winner['key_loja']
+            marketplace = buybox_winner['marketplace']
+            
+            # Atualiza estatísticas do seller
+            if buyboxes_por_seller[key_loja]['loja'] == '':
+                buyboxes_por_seller[key_loja]['loja'] = loja
+                buyboxes_por_seller[key_loja]['key_loja'] = key_loja
+            
+            buyboxes_por_seller[key_loja]['total_buyboxes'] += 1
+            buyboxes_por_seller[key_loja]['marketplaces'].add(marketplace)
+            
+            # Adiciona informações detalhadas do produto
+            buyboxes_por_seller[key_loja]['produtos'].append({
+                'ean': ean,
+                'sku': buybox_winner.get('sku', ''),
+                'url': buybox_winner.get('url', ''),
+                'descricao': buybox_winner.get('descricao', ''),
+                'preco_final': buybox_winner['preco_final'],
+                'marketplace': marketplace
+            })
+    
+    if not buyboxes_por_seller:
+        return {
+            "seller_mais_buyboxes": None,
+            "total_buyboxes": 0,
+            "estatisticas": {},
+            "mensagem": "Nenhum buybox encontrado"
+        }
+    
+    # Encontra o seller com mais buyboxes
+    seller_mais_buyboxes_key = max(buyboxes_por_seller.keys(), 
+                                    key=lambda k: buyboxes_por_seller[k]['total_buyboxes'])
+    
+    seller_info = buyboxes_por_seller[seller_mais_buyboxes_key]
+    
+    # Prepara resultado
+    resultado = {
+        "seller_mais_buyboxes": {
+            "loja": seller_info['loja'],
+            "key_loja": seller_info['key_loja'],
+            "total_buyboxes": seller_info['total_buyboxes'],
+            "marketplaces": list(seller_info['marketplaces']),
+            "total_produtos": len(seller_info['produtos']),
+            "produtos": seller_info['produtos']
+        },
+        "total_buyboxes_analisados": sum(stats['total_buyboxes'] for stats in buyboxes_por_seller.values()),
+        "estatisticas_completas": {
+            key: {
+                "loja": stats['loja'],
+                "total_buyboxes": stats['total_buyboxes'],
+                "marketplaces": list(stats['marketplaces']),
+                "total_produtos": len(stats['produtos']),
+                "produtos": stats['produtos']
+            }
+            for key, stats in buyboxes_por_seller.items()
+        }
+    }
+    
+    logger.info(f"Seller com mais buyboxes: {seller_info['loja']} com {seller_info['total_buyboxes']} buyboxes")
+    
+    return resultado
+
+class ErrorResponse(Schema):
+    detail: str
+    data: Optional[dict] = None
+
+class ProductsDetailsIn(ModelSchema):
+    class Config:
+        model = ProductDetails
+        model_fields = [
+            'ean', 'sku', 'key_sku', 'loja', 'preco_final', 'data_hora', 'marketplace',
+            'key_loja', 'descricao', 'review', 'imagem', 'status',
+            'preco_pricing', 'preco_buybox', 'url', 'marca','categoria'
+        ]
 
 class PriceChangeOut(Schema):
     ean: str
@@ -60,6 +421,35 @@ class PriceChangeOut(Schema):
     timestamp: datetime
     url: str
     descricao: str
+
+class ProdutoBuyboxOut(Schema):
+    ean: str
+    sku: str
+    url: str
+    descricao: str
+    preco_final: float
+    marketplace: str
+
+class SellerBuyboxOut(Schema):
+    loja: str
+    key_loja: str
+    total_buyboxes: int
+    marketplaces: List[str]
+    total_produtos: int
+    produtos: List[ProdutoBuyboxOut]
+
+class EstatisticaSellerOut(Schema):
+    loja: str
+    total_buyboxes: int
+    marketplaces: List[str]
+    total_produtos: int
+    produtos: List[ProdutoBuyboxOut]
+
+class BuyboxAnalysisOut(Schema):
+    seller_mais_buyboxes: Optional[SellerBuyboxOut]
+    total_buyboxes_analisados: int
+    estatisticas_completas: dict
+    mensagem: Optional[str] = None
 
 class ProductURLInputSchema(Schema):
     ean_key: str
@@ -181,45 +571,59 @@ def create_products(request, products: List[ProductsDetailsIn]):
     if not products:
         logger.warning("Lista de produtos vazia recebida")
         return []
-    
+
+    # === FUNÇÃO DE NORMALIZAÇÃO DE LOJA ===
+    def normalizar_loja(nome: str) -> str:
+        if not nome:
+            return "sem_loja"
+        import re
+        nome = re.sub(r'[àáâãäå]', 'a', nome)
+        nome = re.sub(r'[èéêë]', 'e', nome)
+        nome = re.sub(r'[ìíîï]', 'i', nome)
+        nome = re.sub(r'[òóôõö]', 'o', nome)
+        nome = re.sub(r'[ùúûü]', 'u', nome)
+        nome = re.sub(r'[ç]', 'c', nome)
+        return re.sub(r'[^a-z0-9]', '', nome.lower())
+
     ean = products[0].ean
     marketplace = products[0].marketplace
     
     logger.info(f"Processando {len(products)} produtos - EAN: {ean}, Marketplace: {marketplace}")
     
-    # ✅ CORREÇÃO: Buscar produtos existentes APENAS do mesmo EAN + MARKETPLACE
-    existing_sellers = ProductDetails.objects.filter(
-        ean=ean,
-        marketplace=marketplace
-    )
+    # Buscar produtos existentes APENAS do mesmo EAN + MARKETPLACE
+    existing_sellers = ProductDetails.objects.filter(ean=ean, marketplace=marketplace)
     existing_keys = {s.key_sku for s in existing_sellers}
     received_keys = {p.key_sku for p in products}
     
     logger.info(f"Produtos existentes no banco: {len(existing_keys)}")
     logger.info(f"Produtos recebidos na raspagem: {len(received_keys)}")
-    logger.info(f"Keys existentes: {existing_keys}")
-    logger.info(f"Keys recebidas: {received_keys}")
 
-    # Processar produtos recebidos
+    # === PROCESSAR PRODUTOS RECEBIDOS ===
     for product in products:
         try:
             product_data = product.dict()
-            product_data["preco_final"] = Decimal(product_data["preco_final"])
-            if product_data["preco_pricing"]:
-                product_data["preco_pricing"] = Decimal(product_data["preco_pricing"])
-            else:
-                product_data["preco_pricing"] = None
+            product_data["preco_final"] = Decimal(str(product_data["preco_final"]))
+            product_data["preco_pricing"] = (
+                Decimal(str(product_data["preco_pricing"])) 
+                if product_data.get("preco_pricing") not in [None, "", 0] 
+                else None
+            )
             product_data["data_hora"] = timezone.now()
+
+            # === CALCULAR LOJA_NORMALIZADA ===
+            product_data["loja_normalizada"] = normalizar_loja(product_data.get("loja"))
 
             logger.info(
                 f"Processando produto:\n"
                 f"- Seller: {product_data['loja']}\n"
+                f"- Loja Normalizada: {product_data['loja_normalizada']}\n"
                 f"- EAN: {product_data['ean']}\n"
                 f"- Key SKU: {product_data['key_sku']}\n"
                 f"- Preço: R$ {product_data['preco_final']:.2f}\n"
                 f"- Marketplace: {product_data['marketplace']}\n"
             )
 
+            # === DETECTAR MUDANÇA DE PREÇO ===
             existing_product = ProductDetails.objects.filter(key_sku=product_data["key_sku"]).first()
             if existing_product:
                 product_data["change_price"] = existing_product.change_price
@@ -238,12 +642,10 @@ def create_products(request, products: List[ProductsDetailsIn]):
                     logger.info(
                         f"Mudança de preço detectada!\n"
                         f"- Seller: {product_data['loja']}\n"
-                        f"- Produto EAN: {product_data['ean']}\n"
+                        f"- EAN: {product_data['ean']}\n"
                         f"- Preço anterior: R$ {existing_product.preco_final:.2f}\n"
                         f"- Novo preço: R$ {product_data['preco_final']:.2f}\n"
                         f"- Total de mudanças: {product_data['change_price']}\n"
-                        f"- Marketplace: {product_data['marketplace']}\n"
-                        f"- URL: {product_data['url']}\n"
                     )
             else:
                 product_data["change_price"] = 0
@@ -258,25 +660,27 @@ def create_products(request, products: List[ProductsDetailsIn]):
                     descricao=product_data["descricao"]
                 )
                 logger.info(
-                    f"Primeiro preço registrado para novo produto:\n"
+                    f"Primeiro preço registrado:\n"
                     f"- Seller: {product_data['loja']}\n"
-                    f"- Produto EAN: {product_data['ean']}\n"
+                    f"- Loja Normalizada: {product_data['loja_normalizada']}\n"
+                    f"- EAN: {product_data['ean']}\n"
                     f"- Key SKU: {product_data['key_sku']}\n"
                     f"- Preço: R$ {product_data['preco_final']:.2f}\n"
-                    f"- URL: {product_data['url']}\n"
                 )
 
+            # === SALVAR/ATUALIZAR PRODUTO ===
             product_data["status"] = "ativo"
             new_product, created = ProductDetails.objects.update_or_create(
                 key_sku=product_data["key_sku"],
                 defaults=product_data
             )
             created_products.append((new_product, product_data["url"]))
+
         except Exception as e:
             logger.error(f"Erro ao salvar produto {product_data.get('key_sku', 'N/A')}: {str(e)}")
             return 422, {"detail": f"Erro ao salvar produto: {str(e)}", "data": product_data}
 
-    # ✅ CORREÇÃO: Inativar APENAS produtos do MESMO marketplace que não vieram na raspagem
+    # === INATIVAR PRODUTOS QUE NÃO VIERAM NA RASPAGEM ===
     current_time = timezone.now()
     inactivated_count = 0
     
@@ -292,16 +696,17 @@ def create_products(request, products: List[ProductsDetailsIn]):
             inactivated_count += 1
             
             logger.info(
-                f"Produto inativado (não retornou na raspagem):\n"
+                f"Produto inativado:\n"
                 f"- Seller: {existing.loja}\n"
+                f"- Loja Normalizada: {existing.loja_normalizada}\n"
                 f"- EAN: {existing.ean}\n"
                 f"- Key SKU: {existing.key_sku}\n"
                 f"- Marketplace: {existing.marketplace}\n"
-                f"- Status: inativo\n"
             )
     
     logger.info(f"Resumo: {len(products)} ativos, {inactivated_count} inativados")
 
+    # === RETORNAR RESPOSTA COM URL CORRETA ===
     return [
         ProductDetailsOut(
             ean=p.ean,
@@ -321,7 +726,8 @@ def create_products(request, products: List[ProductsDetailsIn]):
             preco_buybox=p.preco_buybox,
             url=url,
             marca=p.marca,
-            categoria=p.categoria
+            categoria=p.categoria,
+            loja_normalizada=p.loja_normalizada  # Agora preenchido!
         ) for p, url in created_products
     ]
 
@@ -616,3 +1022,50 @@ def get_product_by_ean(request, ean: str):
 
     logger.info(f"Retornando {len(results)} produto(s) ATIVO(S) para o EAN {ean}")
     return results
+
+@api.get("/buyboxes/", response={200: Dict[str, Any], 404: ErrorResponse})
+def get_top_seller_buyboxes(request):
+    """
+    Retorna o seller (loja) que mais está ganhando buyboxes.
+    
+    Analisa todos os produtos ativos no banco de dados e identifica qual seller
+    está ganhando mais buyboxes baseado no menor preço por EAN.
+    
+    Returns:
+        - seller_mais_buyboxes: Informações do seller com mais buyboxes
+        - total_buyboxes_analisados: Total de buyboxes analisados
+        - estatisticas_completas: Estatísticas de todos os sellers
+    """
+    try:
+        logger.info("Buscando seller com mais buyboxes...")
+        
+        # Chama a função que analisa os produtos do banco
+        resultado = identificar_seller_mais_buyboxes(usar_banco=True)
+        
+        # Verifica se há erro
+        if resultado.get("erro"):
+            logger.warning(f"Erro ao analisar buyboxes: {resultado.get('erro')}")
+            return 404, {"detail": resultado.get("erro")}
+        
+        # Verifica se não há buyboxes
+        if resultado.get("mensagem") and not resultado.get("seller_mais_buyboxes"):
+            logger.info(resultado.get("mensagem"))
+            return 200, {
+                "seller_mais_buyboxes": None,
+                "total_buyboxes_analisados": 0,
+                "estatisticas_completas": {},
+                "mensagem": resultado.get("mensagem")
+            }
+        
+        seller_info = resultado.get("seller_mais_buyboxes")
+        
+        logger.info(f"Retornando análise de buyboxes - Seller: {seller_info['loja'] if seller_info else 'N/A'}, Total: {resultado.get('total_buyboxes_analisados', 0)}")
+        
+        # Retorna o resultado diretamente (já está no formato JSON compatível)
+        return 200, resultado
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar seller com mais buyboxes: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return 404, {"detail": f"Erro ao analisar buyboxes: {str(e)}"}

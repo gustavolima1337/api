@@ -34,6 +34,7 @@ class ProductDetails(models.Model):
     url = models.URLField(max_length=255)
     marca = models.CharField(max_length=100)
     categoria = models.CharField(max_length=13, choices=[("cosmetico", "Cosmetico"), ("eletronico", "Eletronico")], default="sem categoria")
+    loja_normalizada = models.CharField(max_length=100, default="sem_loja")
 
     def __str__(self):
         return f"{self.ean} - {self.descricao[:50]}"
