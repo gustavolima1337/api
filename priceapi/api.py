@@ -12,11 +12,18 @@ from collections import defaultdict
 from django.db.models import Q
 import re
 
+
 # Configura o logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-api = NinjaAPI()
+api = NinjaAPI(
+    title="PriceTrack - Buy Box Analyzer",
+    version="1.0.0",
+    description="Monitoramento de produtos"
+)
+
+# =================== SCHEMAS ===================
 
 class ProductDetailsOut(Schema):
     ean: str
@@ -39,23 +46,6 @@ class ProductDetailsOut(Schema):
     categoria: str
     loja_normalizada: str
 
-# api.py
-from ninja import NinjaAPI, Schema
-from typing import List, Optional, Dict
-from .models import ProductDetails
-from collections import defaultdict
-import logging
-
-logger = logging.getLogger(__name__)
-
-# =================== NINJA API ===================
-api = NinjaAPI(
-    title="PriceTrack - Buy Box Analyzer",
-    version="2.0.0",
-    description="Análise de Buy Box por seller com campos de marketplaces ganhando/perdendo"
-)
-
-# =================== SCHEMAS ===================
 class ProdutoBuyboxSchema(Schema):
     ean: str
     descricao: str
@@ -75,11 +65,141 @@ class BuyboxSellerResponse(Schema):
     produtos_ganhando: List[ProdutoBuyboxSchema]
     produtos_perdendo: List[ProdutoBuyboxSchema]
     
-
 class ErrorResponse(Schema):
     detail: str
 
-# =================== FUNÇÃO PRINCIPAL ===================
+class ErrorResponse(Schema):
+    detail: str
+    data: Optional[dict] = None
+
+class ProductsDetailsIn(ModelSchema):
+    class Config:
+        model = ProductDetails
+        model_fields = [
+            'ean', 'sku', 'key_sku', 'loja', 'preco_final', 'data_hora', 'marketplace',
+            'key_loja', 'descricao', 'review', 'imagem', 'status',
+            'preco_pricing', 'preco_buybox', 'url', 'marca','categoria'
+        ]
+
+class PriceChangeOut(Schema):
+    ean: str
+    loja: str
+    key_loja: str
+    preco_final_antigo: Optional[Decimal]
+    preco_final_novo: Decimal
+    timestamp: datetime
+    url: str
+    descricao: str
+
+class ProdutoBuyboxOut(Schema):
+    ean: str
+    sku: str
+    url: str
+    descricao: str
+    preco_final: float
+    marketplace: str
+
+class SellerBuyboxOut(Schema):
+    loja: str
+    key_loja: str
+    total_buyboxes: int
+    marketplaces: List[str]
+    total_produtos: int
+    produtos: List[ProdutoBuyboxOut]
+
+class EstatisticaSellerOut(Schema):
+    loja: str
+    total_buyboxes: int
+    marketplaces: List[str]
+    total_produtos: int
+    produtos: List[ProdutoBuyboxOut]
+
+class BuyboxAnalysisOut(Schema):
+    seller_mais_buyboxes: Optional[SellerBuyboxOut]
+    total_buyboxes_analisados: int
+    estatisticas_completas: dict
+    mensagem: Optional[str] = None
+
+class ProductURLInputSchema(Schema):
+    ean_key: str
+    ean: str
+    brand: str
+    url: str
+    client_name: str
+    is_active: Optional[bool] = True
+
+    @staticmethod
+    def validate_ean(ean: str) -> str:
+        if not (ean.isdigit() and len(ean) == 13):
+            raise ValidationError("EAN must be a 13-digit number")
+        return ean
+
+    @staticmethod
+    def validate_url(url: str) -> str:
+        if not url.startswith(('http://', 'https://')):
+            raise ValidationError("URL must start with http:// or https://")
+        return url
+
+    @staticmethod
+    def validate_brand(brand: str) -> str:
+        if not brand or brand.strip() == "":
+            raise ValidationError("Brand cannot be empty")
+        return brand
+
+class UpdateIsActiveSchema(Schema):
+    ean_key: str
+    is_active: bool
+
+class SchemaProductURL(ModelSchema):
+    class Config:
+        model = ProductURL
+        model_fields = ['ean_key', 'ean', 'brand', 'url', 'client', 'created_at', 'client_name', 'is_active']
+
+class UpdatePrecosSchema(Schema):
+    key_sku: str
+    preco_pricing: Optional[Decimal] = None
+    preco_buybox: Optional[Decimal] = None
+    
+    def validate(self):
+        """Valida que pelo menos um preço foi fornecido"""
+        if self.preco_pricing is None and self.preco_buybox is None:
+            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
+        
+        if self.preco_pricing is not None and self.preco_pricing < 0:
+            raise ValidationError("preco_pricing não pode ser negativo")
+        
+        if self.preco_buybox is not None and self.preco_buybox < 0:
+            raise ValidationError("preco_buybox não pode ser negativo")
+        
+        return self
+
+class LojaOut(Schema):
+    loja_normalizada: str
+
+class UpdatePrecosSchema(Schema):
+    key_sku: str
+    preco_pricing: Optional[Decimal] = None
+    preco_buybox: Optional[Decimal] = None
+    
+    def validate(self):
+        """Valida que pelo menos um preço foi fornecido"""
+        if self.preco_pricing is None and self.preco_buybox is None:
+            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
+        
+        if self.preco_pricing is not None and self.preco_pricing < 0:
+            raise ValidationError("preco_pricing não pode ser negativo")
+        
+        if self.preco_buybox is not None and self.preco_buybox < 0:
+            raise ValidationError("preco_buybox não pode ser negativo")
+        
+        return self
+
+class ProdutosMonitorados(Schema):
+    ean: str
+    descricao: str
+
+# =================== ENDPOINT NINJA ===================
+
 def get_buyboxes_by_seller(seller_name: str) -> Dict:
     """
     Calcula Buy Box para um seller usando campo `loja_normalizada`.
@@ -211,7 +331,91 @@ def get_buyboxes_by_seller(seller_name: str) -> Dict:
         "produtos_ganhando": ganhando,
         "produtos_perdendo": perdendo
     }
-# =================== ENDPOINT NINJA ===================
+
+@api.get("/products/monitorados", response=list[dict])
+def get_monitored_products(request):
+    """
+    Retorna lista de produtos monitorados (únicos por EAN),
+    apenas com EAN e descrição.
+    Remove duplicatas mesmo que descrições sejam diferentes.
+    """
+
+    produtos = ProductDetails.objects.filter(status="ativo").values("ean", "descricao")
+
+    # 🔹 Elimina duplicatas manualmente
+    vistos = {}
+    for p in produtos:
+        ean = p["ean"]
+        if ean not in vistos:
+            vistos[ean] = p["descricao"]
+
+    resultado = [{"ean": ean, "descricao": desc} for ean, desc in vistos.items()]
+    resultado.sort(key=lambda x: x["descricao"].lower())
+
+    logger.info(f"Retornados {len(resultado)} produtos únicos por EAN.")
+
+    return resultado
+
+@api.get("/products/{ean}/melhor_oferta", response=Dict[str, Any])
+def get_lowest_price_by_marketplace(request, ean: str):
+    """
+    Retorna o seller com o menor preço para o produto (EAN)
+    em cada marketplace onde ele está sendo vendido.
+    """
+
+    # validação simples do EAN
+    if not ean.isdigit() or len(ean) != 13:
+        return 422, {"detail": "EAN deve conter 13 dígitos numéricos."}
+
+    produtos = ProductDetails.objects.filter(
+        ean=ean,
+        status="ativo"
+    )
+
+    if not produtos.exists():
+        return 404, {"detail": f"Nenhum produto ativo encontrado para o EAN {ean}"}
+
+    # Agrupamento por marketplace
+    marketplaces = {}
+    for produto in produtos:
+        marketplace = produto.marketplace
+        preco = float(produto.preco_final or 0)
+
+        # se for o primeiro produto do marketplace ou preço menor -> atualiza
+        if marketplace not in marketplaces or preco < marketplaces[marketplace]["preco_final"]:
+            marketplaces[marketplace] = {
+                "ean": produto.ean,
+                "descricao": produto.descricao,
+                "marca": produto.marca,
+                "marketplace": produto.marketplace,
+                "seller": produto.loja,
+                "loja_normalizada": produto.loja_normalizada,
+                "preco_final": preco,
+                "url": produto.url if hasattr(produto, "url") else None,
+                "imagem": produto.imagem,
+            }
+
+    # cálculos agregados gerais
+    precos = [v["preco_final"] for v in marketplaces.values()]
+    menor_preco = min(precos)
+    maior_preco = max(precos)
+    media_preco = round(sum(precos) / len(precos), 2)
+
+    logger.info(f"Analisados {len(produtos)} produtos para EAN {ean}")
+
+    return {
+        "ean": ean,
+        "marca": produtos.first().marca,
+        "descricao": produtos.first().descricao,
+        "quantidade_marketplaces": len(marketplaces),
+        "resumo_precos": {
+            "menor_preco_geral": menor_preco,
+            "maior_preco_geral": maior_preco,
+            "media_precos": media_preco
+        },
+        "melhores_ofertas": list(marketplaces.values())
+    }
+
 @api.get("/buyboxes/{seller_name}",
     response={200: BuyboxSellerResponse, 404: ErrorResponse}
 )
@@ -399,114 +603,6 @@ def identificar_seller_mais_buyboxes(produtos=None, usar_banco=True):
     
     return resultado
 
-class ErrorResponse(Schema):
-    detail: str
-    data: Optional[dict] = None
-
-class ProductsDetailsIn(ModelSchema):
-    class Config:
-        model = ProductDetails
-        model_fields = [
-            'ean', 'sku', 'key_sku', 'loja', 'preco_final', 'data_hora', 'marketplace',
-            'key_loja', 'descricao', 'review', 'imagem', 'status',
-            'preco_pricing', 'preco_buybox', 'url', 'marca','categoria'
-        ]
-
-class PriceChangeOut(Schema):
-    ean: str
-    loja: str
-    key_loja: str
-    preco_final_antigo: Optional[Decimal]
-    preco_final_novo: Decimal
-    timestamp: datetime
-    url: str
-    descricao: str
-
-class ProdutoBuyboxOut(Schema):
-    ean: str
-    sku: str
-    url: str
-    descricao: str
-    preco_final: float
-    marketplace: str
-
-class SellerBuyboxOut(Schema):
-    loja: str
-    key_loja: str
-    total_buyboxes: int
-    marketplaces: List[str]
-    total_produtos: int
-    produtos: List[ProdutoBuyboxOut]
-
-class EstatisticaSellerOut(Schema):
-    loja: str
-    total_buyboxes: int
-    marketplaces: List[str]
-    total_produtos: int
-    produtos: List[ProdutoBuyboxOut]
-
-class BuyboxAnalysisOut(Schema):
-    seller_mais_buyboxes: Optional[SellerBuyboxOut]
-    total_buyboxes_analisados: int
-    estatisticas_completas: dict
-    mensagem: Optional[str] = None
-
-class ProductURLInputSchema(Schema):
-    ean_key: str
-    ean: str
-    brand: str
-    url: str
-    client_name: str
-    is_active: Optional[bool] = True
-
-    @staticmethod
-    def validate_ean(ean: str) -> str:
-        if not (ean.isdigit() and len(ean) == 13):
-            raise ValidationError("EAN must be a 13-digit number")
-        return ean
-
-    @staticmethod
-    def validate_url(url: str) -> str:
-        if not url.startswith(('http://', 'https://')):
-            raise ValidationError("URL must start with http:// or https://")
-        return url
-
-    @staticmethod
-    def validate_brand(brand: str) -> str:
-        if not brand or brand.strip() == "":
-            raise ValidationError("Brand cannot be empty")
-        return brand
-
-class UpdateIsActiveSchema(Schema):
-    ean_key: str
-    is_active: bool
-
-class SchemaProductURL(ModelSchema):
-    class Config:
-        model = ProductURL
-        model_fields = ['ean_key', 'ean', 'brand', 'url', 'client', 'created_at', 'client_name', 'is_active']
-
-class UpdatePrecosSchema(Schema):
-    key_sku: str
-    preco_pricing: Optional[Decimal] = None
-    preco_buybox: Optional[Decimal] = None
-    
-    def validate(self):
-        """Valida que pelo menos um preço foi fornecido"""
-        if self.preco_pricing is None and self.preco_buybox is None:
-            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
-        
-        if self.preco_pricing is not None and self.preco_pricing < 0:
-            raise ValidationError("preco_pricing não pode ser negativo")
-        
-        if self.preco_buybox is not None and self.preco_buybox < 0:
-            raise ValidationError("preco_buybox não pode ser negativo")
-        
-        return self
-
-class LojaOut(Schema):
-    loja_normalizada: str
-
 @api.get("/products/lojas", response=List[LojaOut])
 def listar_lojas_normalizadas(request):
     """
@@ -519,33 +615,333 @@ def listar_lojas_normalizadas(request):
     )
     return [{"loja_normalizada": loja} for loja in lojas]
 
-@api.post('urls', response=List[SchemaProductURL])
-def post_urls(request, payload: List[ProductURLInputSchema]):
-    logger.info(f"Recebendo {len(payload)} URLs para salvar")
-    created_products = []
-    for url_data in payload:
-        try:
-            product = ProductURL(
-                ean_key=url_data.ean_key,
-                ean=url_data.ean,
-                brand=url_data.brand,
-                url=url_data.url,
-                client_name=url_data.client_name,
-                client=None,
-                is_active=url_data.is_active
-            )
-            created_products.append(product)
-        except IntegrityError as e:
-            logger.error(f"Erro ao salvar produto (possível duplicata): {e}")
-            continue
-    ProductURL.objects.bulk_create(created_products, ignore_conflicts=True)
-    created_eans = [url_data.ean for url_data in payload]
-    logger.info(f"Produtos salvos: {created_eans}")
-    return ProductURL.objects.filter(ean__in=created_eans)
+@api.get("/buyboxes/", response={200: Dict[str, Any], 404: ErrorResponse})
+def get_top_seller_buyboxes(request):
+    """
+    Retorna o seller (loja) que mais está ganhando buyboxes.
+    
+    Analisa todos os produtos ativos no banco de dados e identifica qual seller
+    está ganhando mais buyboxes baseado no menor preço por EAN.
+    
+    Returns:
+        - seller_mais_buyboxes: Informações do seller com mais buyboxes
+        - total_buyboxes_analisados: Total de buyboxes analisados
+        - estatisticas_completas: Estatísticas de todos os sellers
+    """
+    try:
+        logger.info("Buscando seller com mais buyboxes...")
+        
+        # Chama a função que analisa os produtos do banco
+        resultado = identificar_seller_mais_buyboxes(usar_banco=True)
+        
+        # Verifica se há erro
+        if resultado.get("erro"):
+            logger.warning(f"Erro ao analisar buyboxes: {resultado.get('erro')}")
+            return 404, {"detail": resultado.get("erro")}
+        
+        # Verifica se não há buyboxes
+        if resultado.get("mensagem") and not resultado.get("seller_mais_buyboxes"):
+            logger.info(resultado.get("mensagem"))
+            return 200, {
+                "seller_mais_buyboxes": None,
+                "total_buyboxes_analisados": 0,
+                "estatisticas_completas": {},
+                "mensagem": resultado.get("mensagem")
+            }
+        
+        seller_info = resultado.get("seller_mais_buyboxes")
+        
+        logger.info(f"Retornando análise de buyboxes - Seller: {seller_info['loja'] if seller_info else 'N/A'}, Total: {resultado.get('total_buyboxes_analisados', 0)}")
+        
+        # Retorna o resultado diretamente (já está no formato JSON compatível)
+        return 200, resultado
+        
+    except Exception as e:
+        logger.error(f"Erro ao buscar seller com mais buyboxes: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return 404, {"detail": f"Erro ao analisar buyboxes: {str(e)}"}
 
 @api.get('urls/', response=List[SchemaProductURL])
 def get_urls(request):
     return ProductURL.objects.all()
+
+@api.get('products/', response=List[ProductDetailsOut])
+def get_products(request):
+    return ProductDetails.objects.all()
+
+@api.get("/products/{ean}", response=List[ProductDetailsOut])
+def get_product_by_ean(request, ean: str):
+    """
+    Busca APENAS produtos ATIVOS de um ÚNICO EAN.
+    
+    Exemplo: /api/products/by_ean/7891234567890
+    """
+    # Validação rigorosa do EAN
+    if not ean.isdigit() or len(ean) != 13:
+        logger.warning(f"EAN inválido recebido: {ean}")
+        return 422, {"detail": "EAN deve ter exatamente 13 dígitos numéricos"}
+
+    logger.info(f"Consulta de produtos ATIVOS para o EAN: {ean}")
+
+    # ✅ FILTRA APENAS PRODUTOS COM status="ativo"
+    queryset = ProductDetails.objects.filter(
+        ean=ean,
+        status="ativo"  # <--- AQUI O FILTRO PRINCIPAL
+    ).order_by('-data_hora')
+
+    if not queryset.exists():
+        logger.info(f"Nenhum produto ATIVO encontrado para o EAN: {ean}")
+        return 404, {"detail": f"Nenhum produto ativo encontrado para o EAN {ean}"}
+
+    results = []
+    for product in queryset:
+        # URL principal do produto (do ProductURL)
+        product_url_obj = ProductURL.objects.filter(ean=ean).first()
+        url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
+
+        results.append(
+            ProductDetailsOut(
+                ean=product.ean,
+                sku=product.sku,
+                loja=product.loja,
+                preco_final=product.preco_final,
+                data_hora=product.data_hora,
+                marketplace=product.marketplace,
+                change_price=product.change_price,
+                key_loja=product.key_loja,
+                key_sku=product.key_sku,
+                descricao=product.descricao,
+                review=product.review,
+                imagem=product.imagem,
+                status=product.status,  # sempre será "ativo"
+                preco_pricing=product.preco_pricing,
+                preco_buybox=product.preco_buybox,
+                url=url,
+                marca=product.marca,
+                categoria=product.categoria
+            )
+        )
+
+    logger.info(f"Retornando {len(results)} produto(s) ATIVO(S) para o EAN {ean}")
+    return results
+
+@api.get("/price_changes/", response=List[PriceChangeOut])
+def get_price_changes(request, ean: Optional[str] = None, loja: Optional[str] = None):
+    logger.info(f"Consultando alterações de preço: ean={ean}, loja={loja}")
+    queryset = PriceChange.objects.exclude(preco_final_antigo__isnull=True)
+    if ean:
+        queryset = queryset.filter(ean=ean)
+    if loja:
+        queryset = queryset.filter(loja=loja)
+    queryset = queryset.order_by('-timestamp')
+    return [
+        PriceChangeOut(
+            ean=change.ean,
+            loja=change.loja,
+            key_loja=change.key_loja,
+            preco_final_antigo=change.preco_final_antigo,
+            preco_final_novo=change.preco_final_novo,
+            timestamp=change.timestamp,
+            url=change.url,
+            descricao=change.descricao
+        ) for change in queryset
+    ]
+
+@api.delete("/delproducts/")
+def remove_all_products(request):
+    try:
+        logger.info("Iniciando exclusão de todos os produtos")
+        count = ProductDetails.objects.all().delete()[0]
+        logger.info(f"{count} produtos excluídos com sucesso")
+        return {"message": f"{count} produtos excluídos com sucesso"}
+    except Exception as e:
+        logger.error(f"Erro ao excluir produtos: {str(e)}")
+        return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
+
+@api.delete("/urls/{ean_key}", response={200: dict, 404: ErrorResponse, 500: ErrorResponse})
+def remove_url(request, ean_key: str):
+    """
+    Deleta uma URL específica pelo ean_key
+    """
+    try:
+        logger.info(f"Tentando excluir URL com ean_key: {ean_key}")
+        
+        # Busca o objeto ou retorna 404
+        try:
+            url_obj = ProductURL.objects.get(ean_key=ean_key)
+        except ProductURL.DoesNotExist:
+            logger.warning(f"URL com ean_key {ean_key} não encontrada")
+            return 404, {"detail": f"URL com ean_key '{ean_key}' não encontrada"}
+        
+        url_value = url_obj.url
+        ean = url_obj.ean
+        
+        # Deleta o objeto
+        url_obj.delete()
+        
+        logger.info(f"URL excluída com sucesso - EAN: {ean}, URL: {url_value}")
+        return 200, {
+            "message": "URL excluída com sucesso",
+            "ean_key": ean_key,
+            "ean": ean,
+            "url": url_value
+        }
+        
+    except Exception as e:
+        logger.error(f"Erro ao excluir URL com ean_key {ean_key}: {str(e)}")
+        return 500, {"detail": f"Erro ao excluir URL: {str(e)}"}
+
+@api.patch('/products/update_precos', response={200: List[ProductDetailsOut], 404: ErrorResponse, 422: ErrorResponse})
+def update_precos(request, payload: List[UpdatePrecosSchema]):
+    """
+    Atualiza preco_pricing e/ou preco_buybox de um ou mais produtos
+    """
+    try:
+        logger.info(f"Recebendo {len(payload)} atualizações de preços")
+        updated_products = []
+        key_skus = [item.key_sku for item in payload]
+        
+        # Busca todos os produtos de uma vez
+        products = ProductDetails.objects.filter(key_sku__in=key_skus)
+        
+        if not products.exists():
+            logger.warning("Nenhum produto encontrado para os key_sku fornecidos")
+            return 404, {"detail": "Nenhum produto encontrado"}
+        
+        # Cria um dicionário para acesso rápido
+        products_dict = {p.key_sku: p for p in products}
+        
+        for item in payload:
+            # Valida o schema
+            try:
+                item.validate()
+            except ValidationError as e:
+                return 422, {"detail": str(e)}
+            
+            if item.key_sku not in products_dict:
+                logger.warning(f"Produto {item.key_sku} não encontrado")
+                continue
+            
+            product = products_dict[item.key_sku]
+            campos_atualizados = []
+            
+            # ✅ CORREÇÃO: Validação entre preco_pricing e preco_buybox
+            # Regra: preco_pricing (mínimo) NÃO pode ser maior que preco_buybox (seu preço)
+            if item.preco_pricing is not None and item.preco_buybox is not None:
+                if item.preco_pricing > item.preco_buybox:
+                    logger.warning(
+                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_buybox "
+                        f"(R$ {item.preco_buybox:.2f}) para {item.key_sku}"
+                    )
+                    return 422, {
+                        "detail": "preco_pricing não pode ser maior que preco_buybox",
+                        "data": {
+                            "key_sku": item.key_sku,
+                            "preco_pricing_enviado": float(item.preco_pricing),
+                            "preco_buybox_enviado": float(item.preco_buybox)
+                        }
+                    }
+            
+            # Validação quando apenas preco_pricing é atualizado
+            elif item.preco_pricing is not None and item.preco_buybox is None:
+                # Verifica contra o preco_buybox existente no banco
+                if product.preco_buybox and item.preco_pricing > product.preco_buybox:
+                    logger.warning(
+                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_buybox atual "
+                        f"(R$ {product.preco_buybox:.2f}) para {item.key_sku}"
+                    )
+                    return 422, {
+                        "detail": "preco_pricing não pode ser maior que preco_buybox atual",
+                        "data": {
+                            "key_sku": item.key_sku,
+                            "preco_pricing_enviado": float(item.preco_pricing),
+                            "preco_buybox_atual": float(product.preco_buybox)
+                        }
+                    }
+            
+            # Validação quando apenas preco_buybox é atualizado
+            elif item.preco_buybox is not None and item.preco_pricing is None:
+                # Verifica contra o preco_pricing existente no banco
+                if product.preco_pricing and product.preco_pricing > item.preco_buybox:
+                    logger.warning(
+                        f"preco_pricing atual (R$ {product.preco_pricing:.2f}) maior que preco_buybox novo "
+                        f"(R$ {item.preco_buybox:.2f}) para {item.key_sku}"
+                    )
+                    return 422, {
+                        "detail": "preco_buybox não pode ser menor que preco_pricing atual",
+                        "data": {
+                            "key_sku": item.key_sku,
+                            "preco_pricing_atual": float(product.preco_pricing),
+                            "preco_buybox_enviado": float(item.preco_buybox)
+                        }
+                    }
+            
+            # Atualiza preco_pricing se fornecido
+            if item.preco_pricing is not None:
+                product.preco_pricing = item.preco_pricing
+                campos_atualizados.append(f"preco_pricing: R$ {item.preco_pricing:.2f}")
+            
+            # Atualiza preco_buybox se fornecido
+            if item.preco_buybox is not None:
+                product.preco_buybox = item.preco_buybox
+                campos_atualizados.append(f"preco_buybox: R$ {item.preco_buybox:.2f}")
+            
+            updated_products.append(product)
+            
+            logger.info(
+                f"Atualizando preços:\n"
+                f"- Key SKU: {item.key_sku}\n"
+                f"- Loja: {product.loja}\n"
+                f"- Produto: {product.descricao[:50]}\n"
+                f"- Preço Final (mercado): R$ {product.preco_final:.2f}\n"
+                f"- Campos atualizados: {', '.join(campos_atualizados)}\n"
+            )
+        
+        # Determina quais campos atualizar
+        fields_to_update = []
+        if any(item.preco_pricing is not None for item in payload):
+            fields_to_update.append('preco_pricing')
+        if any(item.preco_buybox is not None for item in payload):
+            fields_to_update.append('preco_buybox')
+        
+        # Atualiza todos de uma vez
+        ProductDetails.objects.bulk_update(updated_products, fields_to_update)
+        
+        logger.info(f"{len(updated_products)} produtos atualizados com sucesso")
+        
+        # Busca URLs para retornar na resposta
+        result = []
+        for product in updated_products:
+            product_url = ProductURL.objects.filter(ean=product.ean).first()
+            url = product_url.url if product_url else "https://via.placeholder.com/150"
+            
+            result.append(ProductDetailsOut(
+                ean=product.ean,
+                sku=product.sku,
+                key_sku=product.key_sku,
+                loja=product.loja,
+                preco_final=product.preco_final,
+                data_hora=product.data_hora,
+                marketplace=product.marketplace,
+                change_price=product.change_price,
+                key_loja=product.key_loja,
+                descricao=product.descricao,
+                review=product.review,
+                imagem=product.imagem,
+                status=product.status,
+                preco_pricing=product.preco_pricing,
+                preco_buybox=product.preco_buybox,
+                url=url,
+                marca=product.marca,
+                categoria=product.categoria
+            ))
+        
+        return 200, result
+        
+    except Exception as e:
+        logger.error(f"Erro ao atualizar preços: {str(e)}")
+        return 422, {"detail": f"Erro ao atualizar preços: {str(e)}"}
 
 @api.patch('/urls/update_is_active', response={200: List[SchemaProductURL], 422: ErrorResponse})
 def update_is_active(request, payload: List[UpdateIsActiveSchema]):
@@ -574,10 +970,6 @@ def update_is_active(request, payload: List[UpdateIsActiveSchema]):
     except Exception as e:
         logger.error(f"Erro ao atualizar is_active: {str(e)}")
         return 422, {"detail": f"Erro ao atualizar is_active: {str(e)}"}
-
-@api.get('products/', response=List[ProductDetailsOut])
-def get_products(request):
-    return ProductDetails.objects.all()
 
 @api.post("/products", response={200: List[ProductDetailsOut], 422: ErrorResponse})
 def create_products(request, products: List[ProductsDetailsIn]):
@@ -742,345 +1134,30 @@ def create_products(request, products: List[ProductsDetailsIn]):
             url=url,
             marca=p.marca,
             categoria=p.categoria,
-            loja_normalizada=p.loja_normalizada  # Agora preenchido!
+            loja_normalizada=p.loja_normalizada
         ) for p, url in created_products
     ]
 
-@api.get("/price_changes/", response=List[PriceChangeOut])
-def get_price_changes(request, ean: Optional[str] = None, loja: Optional[str] = None):
-    logger.info(f"Consultando alterações de preço: ean={ean}, loja={loja}")
-    queryset = PriceChange.objects.exclude(preco_final_antigo__isnull=True)
-    if ean:
-        queryset = queryset.filter(ean=ean)
-    if loja:
-        queryset = queryset.filter(loja=loja)
-    queryset = queryset.order_by('-timestamp')
-    return [
-        PriceChangeOut(
-            ean=change.ean,
-            loja=change.loja,
-            key_loja=change.key_loja,
-            preco_final_antigo=change.preco_final_antigo,
-            preco_final_novo=change.preco_final_novo,
-            timestamp=change.timestamp,
-            url=change.url,
-            descricao=change.descricao
-        ) for change in queryset
-    ]
-
-@api.delete("/delproducts/")
-def remove_all_products(request):
-    try:
-        logger.info("Iniciando exclusão de todos os produtos")
-        count = ProductDetails.objects.all().delete()[0]
-        logger.info(f"{count} produtos excluídos com sucesso")
-        return {"message": f"{count} produtos excluídos com sucesso"}
-    except Exception as e:
-        logger.error(f"Erro ao excluir produtos: {str(e)}")
-        return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
-
-@api.delete("/urls/{ean_key}", response={200: dict, 404: ErrorResponse, 500: ErrorResponse})
-def remove_url(request, ean_key: str):
-    """
-    Deleta uma URL específica pelo ean_key
-    """
-    try:
-        logger.info(f"Tentando excluir URL com ean_key: {ean_key}")
-        
-        # Busca o objeto ou retorna 404
+@api.post('urls', response=List[SchemaProductURL])
+def post_urls(request, payload: List[ProductURLInputSchema]):
+    logger.info(f"Recebendo {len(payload)} URLs para salvar")
+    created_products = []
+    for url_data in payload:
         try:
-            url_obj = ProductURL.objects.get(ean_key=ean_key)
-        except ProductURL.DoesNotExist:
-            logger.warning(f"URL com ean_key {ean_key} não encontrada")
-            return 404, {"detail": f"URL com ean_key '{ean_key}' não encontrada"}
-        
-        url_value = url_obj.url
-        ean = url_obj.ean
-        
-        # Deleta o objeto
-        url_obj.delete()
-        
-        logger.info(f"URL excluída com sucesso - EAN: {ean}, URL: {url_value}")
-        return 200, {
-            "message": "URL excluída com sucesso",
-            "ean_key": ean_key,
-            "ean": ean,
-            "url": url_value
-        }
-        
-    except Exception as e:
-        logger.error(f"Erro ao excluir URL com ean_key {ean_key}: {str(e)}")
-        return 500, {"detail": f"Erro ao excluir URL: {str(e)}"}
-
-class UpdatePrecosSchema(Schema):
-    key_sku: str
-    preco_pricing: Optional[Decimal] = None
-    preco_buybox: Optional[Decimal] = None
-    
-    def validate(self):
-        """Valida que pelo menos um preço foi fornecido"""
-        if self.preco_pricing is None and self.preco_buybox is None:
-            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
-        
-        if self.preco_pricing is not None and self.preco_pricing < 0:
-            raise ValidationError("preco_pricing não pode ser negativo")
-        
-        if self.preco_buybox is not None and self.preco_buybox < 0:
-            raise ValidationError("preco_buybox não pode ser negativo")
-        
-        return self
-
-@api.patch('/products/update_precos', response={200: List[ProductDetailsOut], 404: ErrorResponse, 422: ErrorResponse})
-def update_precos(request, payload: List[UpdatePrecosSchema]):
-    """
-    Atualiza preco_pricing e/ou preco_buybox de um ou mais produtos
-    """
-    try:
-        logger.info(f"Recebendo {len(payload)} atualizações de preços")
-        updated_products = []
-        key_skus = [item.key_sku for item in payload]
-        
-        # Busca todos os produtos de uma vez
-        products = ProductDetails.objects.filter(key_sku__in=key_skus)
-        
-        if not products.exists():
-            logger.warning("Nenhum produto encontrado para os key_sku fornecidos")
-            return 404, {"detail": "Nenhum produto encontrado"}
-        
-        # Cria um dicionário para acesso rápido
-        products_dict = {p.key_sku: p for p in products}
-        
-        for item in payload:
-            # Valida o schema
-            try:
-                item.validate()
-            except ValidationError as e:
-                return 422, {"detail": str(e)}
-            
-            if item.key_sku not in products_dict:
-                logger.warning(f"Produto {item.key_sku} não encontrado")
-                continue
-            
-            product = products_dict[item.key_sku]
-            campos_atualizados = []
-            
-            # ✅ CORREÇÃO: Validação entre preco_pricing e preco_buybox
-            # Regra: preco_pricing (mínimo) NÃO pode ser maior que preco_buybox (seu preço)
-            if item.preco_pricing is not None and item.preco_buybox is not None:
-                if item.preco_pricing > item.preco_buybox:
-                    logger.warning(
-                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_buybox "
-                        f"(R$ {item.preco_buybox:.2f}) para {item.key_sku}"
-                    )
-                    return 422, {
-                        "detail": "preco_pricing não pode ser maior que preco_buybox",
-                        "data": {
-                            "key_sku": item.key_sku,
-                            "preco_pricing_enviado": float(item.preco_pricing),
-                            "preco_buybox_enviado": float(item.preco_buybox)
-                        }
-                    }
-            
-            # Validação quando apenas preco_pricing é atualizado
-            elif item.preco_pricing is not None and item.preco_buybox is None:
-                # Verifica contra o preco_buybox existente no banco
-                if product.preco_buybox and item.preco_pricing > product.preco_buybox:
-                    logger.warning(
-                        f"preco_pricing (R$ {item.preco_pricing:.2f}) maior que preco_buybox atual "
-                        f"(R$ {product.preco_buybox:.2f}) para {item.key_sku}"
-                    )
-                    return 422, {
-                        "detail": "preco_pricing não pode ser maior que preco_buybox atual",
-                        "data": {
-                            "key_sku": item.key_sku,
-                            "preco_pricing_enviado": float(item.preco_pricing),
-                            "preco_buybox_atual": float(product.preco_buybox)
-                        }
-                    }
-            
-            # Validação quando apenas preco_buybox é atualizado
-            elif item.preco_buybox is not None and item.preco_pricing is None:
-                # Verifica contra o preco_pricing existente no banco
-                if product.preco_pricing and product.preco_pricing > item.preco_buybox:
-                    logger.warning(
-                        f"preco_pricing atual (R$ {product.preco_pricing:.2f}) maior que preco_buybox novo "
-                        f"(R$ {item.preco_buybox:.2f}) para {item.key_sku}"
-                    )
-                    return 422, {
-                        "detail": "preco_buybox não pode ser menor que preco_pricing atual",
-                        "data": {
-                            "key_sku": item.key_sku,
-                            "preco_pricing_atual": float(product.preco_pricing),
-                            "preco_buybox_enviado": float(item.preco_buybox)
-                        }
-                    }
-            
-            # Atualiza preco_pricing se fornecido
-            if item.preco_pricing is not None:
-                product.preco_pricing = item.preco_pricing
-                campos_atualizados.append(f"preco_pricing: R$ {item.preco_pricing:.2f}")
-            
-            # Atualiza preco_buybox se fornecido
-            if item.preco_buybox is not None:
-                product.preco_buybox = item.preco_buybox
-                campos_atualizados.append(f"preco_buybox: R$ {item.preco_buybox:.2f}")
-            
-            updated_products.append(product)
-            
-            logger.info(
-                f"Atualizando preços:\n"
-                f"- Key SKU: {item.key_sku}\n"
-                f"- Loja: {product.loja}\n"
-                f"- Produto: {product.descricao[:50]}\n"
-                f"- Preço Final (mercado): R$ {product.preco_final:.2f}\n"
-                f"- Campos atualizados: {', '.join(campos_atualizados)}\n"
+            product = ProductURL(
+                ean_key=url_data.ean_key,
+                ean=url_data.ean,
+                brand=url_data.brand,
+                url=url_data.url,
+                client_name=url_data.client_name,
+                client=None,
+                is_active=url_data.is_active
             )
-        
-        # Determina quais campos atualizar
-        fields_to_update = []
-        if any(item.preco_pricing is not None for item in payload):
-            fields_to_update.append('preco_pricing')
-        if any(item.preco_buybox is not None for item in payload):
-            fields_to_update.append('preco_buybox')
-        
-        # Atualiza todos de uma vez
-        ProductDetails.objects.bulk_update(updated_products, fields_to_update)
-        
-        logger.info(f"{len(updated_products)} produtos atualizados com sucesso")
-        
-        # Busca URLs para retornar na resposta
-        result = []
-        for product in updated_products:
-            product_url = ProductURL.objects.filter(ean=product.ean).first()
-            url = product_url.url if product_url else "https://via.placeholder.com/150"
-            
-            result.append(ProductDetailsOut(
-                ean=product.ean,
-                sku=product.sku,
-                key_sku=product.key_sku,
-                loja=product.loja,
-                preco_final=product.preco_final,
-                data_hora=product.data_hora,
-                marketplace=product.marketplace,
-                change_price=product.change_price,
-                key_loja=product.key_loja,
-                descricao=product.descricao,
-                review=product.review,
-                imagem=product.imagem,
-                status=product.status,
-                preco_pricing=product.preco_pricing,
-                preco_buybox=product.preco_buybox,
-                url=url,
-                marca=product.marca,
-                categoria=product.categoria
-            ))
-        
-        return 200, result
-        
-    except Exception as e:
-        logger.error(f"Erro ao atualizar preços: {str(e)}")
-        return 422, {"detail": f"Erro ao atualizar preços: {str(e)}"}
-    
-
-@api.get("/products/{ean}", response=List[ProductDetailsOut])
-def get_product_by_ean(request, ean: str):
-    """
-    Busca APENAS produtos ATIVOS de um ÚNICO EAN.
-    
-    Exemplo: /api/products/by_ean/7891234567890
-    """
-    # Validação rigorosa do EAN
-    if not ean.isdigit() or len(ean) != 13:
-        logger.warning(f"EAN inválido recebido: {ean}")
-        return 422, {"detail": "EAN deve ter exatamente 13 dígitos numéricos"}
-
-    logger.info(f"Consulta de produtos ATIVOS para o EAN: {ean}")
-
-    # ✅ FILTRA APENAS PRODUTOS COM status="ativo"
-    queryset = ProductDetails.objects.filter(
-        ean=ean,
-        status="ativo"  # <--- AQUI O FILTRO PRINCIPAL
-    ).order_by('-data_hora')
-
-    if not queryset.exists():
-        logger.info(f"Nenhum produto ATIVO encontrado para o EAN: {ean}")
-        return 404, {"detail": f"Nenhum produto ativo encontrado para o EAN {ean}"}
-
-    results = []
-    for product in queryset:
-        # URL principal do produto (do ProductURL)
-        product_url_obj = ProductURL.objects.filter(ean=ean).first()
-        url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
-
-        results.append(
-            ProductDetailsOut(
-                ean=product.ean,
-                sku=product.sku,
-                loja=product.loja,
-                preco_final=product.preco_final,
-                data_hora=product.data_hora,
-                marketplace=product.marketplace,
-                change_price=product.change_price,
-                key_loja=product.key_loja,
-                key_sku=product.key_sku,
-                descricao=product.descricao,
-                review=product.review,
-                imagem=product.imagem,
-                status=product.status,  # sempre será "ativo"
-                preco_pricing=product.preco_pricing,
-                preco_buybox=product.preco_buybox,
-                url=url,
-                marca=product.marca,
-                categoria=product.categoria
-            )
-        )
-
-    logger.info(f"Retornando {len(results)} produto(s) ATIVO(S) para o EAN {ean}")
-    return results
-
-@api.get("/buyboxes/", response={200: Dict[str, Any], 404: ErrorResponse})
-def get_top_seller_buyboxes(request):
-    """
-    Retorna o seller (loja) que mais está ganhando buyboxes.
-    
-    Analisa todos os produtos ativos no banco de dados e identifica qual seller
-    está ganhando mais buyboxes baseado no menor preço por EAN.
-    
-    Returns:
-        - seller_mais_buyboxes: Informações do seller com mais buyboxes
-        - total_buyboxes_analisados: Total de buyboxes analisados
-        - estatisticas_completas: Estatísticas de todos os sellers
-    """
-    try:
-        logger.info("Buscando seller com mais buyboxes...")
-        
-        # Chama a função que analisa os produtos do banco
-        resultado = identificar_seller_mais_buyboxes(usar_banco=True)
-        
-        # Verifica se há erro
-        if resultado.get("erro"):
-            logger.warning(f"Erro ao analisar buyboxes: {resultado.get('erro')}")
-            return 404, {"detail": resultado.get("erro")}
-        
-        # Verifica se não há buyboxes
-        if resultado.get("mensagem") and not resultado.get("seller_mais_buyboxes"):
-            logger.info(resultado.get("mensagem"))
-            return 200, {
-                "seller_mais_buyboxes": None,
-                "total_buyboxes_analisados": 0,
-                "estatisticas_completas": {},
-                "mensagem": resultado.get("mensagem")
-            }
-        
-        seller_info = resultado.get("seller_mais_buyboxes")
-        
-        logger.info(f"Retornando análise de buyboxes - Seller: {seller_info['loja'] if seller_info else 'N/A'}, Total: {resultado.get('total_buyboxes_analisados', 0)}")
-        
-        # Retorna o resultado diretamente (já está no formato JSON compatível)
-        return 200, resultado
-        
-    except Exception as e:
-        logger.error(f"Erro ao buscar seller com mais buyboxes: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return 404, {"detail": f"Erro ao analisar buyboxes: {str(e)}"}
+            created_products.append(product)
+        except IntegrityError as e:
+            logger.error(f"Erro ao salvar produto (possível duplicata): {e}")
+            continue
+    ProductURL.objects.bulk_create(created_products, ignore_conflicts=True)
+    created_eans = [url_data.ean for url_data in payload]
+    logger.info(f"Produtos salvos: {created_eans}")
+    return ProductURL.objects.filter(ean__in=created_eans)
