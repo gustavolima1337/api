@@ -504,6 +504,21 @@ class UpdatePrecosSchema(Schema):
         
         return self
 
+class LojaOut(Schema):
+    loja_normalizada: str
+
+@api.get("/products/lojas", response=List[LojaOut])
+def listar_lojas_normalizadas(request):
+    """
+    Retorna apenas os valores únicos de loja_normalizada dos produtos.
+    """
+    lojas = (
+        ProductDetails.objects
+        .values_list("loja_normalizada", flat=True)
+        .distinct()
+    )
+    return [{"loja_normalizada": loja} for loja in lojas]
+
 @api.post('urls', response=List[SchemaProductURL])
 def post_urls(request, payload: List[ProductURLInputSchema]):
     logger.info(f"Recebendo {len(payload)} URLs para salvar")
