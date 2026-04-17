@@ -67,9 +67,6 @@ class BuyboxSellerResponse(Schema):
     
 class ErrorResponse(Schema):
     detail: str
-
-class ErrorResponse(Schema):
-    detail: str
     data: Optional[dict] = None
 
 class ProductsDetailsIn(ModelSchema):
@@ -176,27 +173,22 @@ class UpdatePrecosSchema(Schema):
 class LojaOut(Schema):
     loja_normalizada: str
 
-class UpdatePrecosSchema(Schema):
-    key_sku: str
-    preco_pricing: Optional[Decimal] = None
-    preco_buybox: Optional[Decimal] = None
-    
-    def validate(self):
-        """Valida que pelo menos um preço foi fornecido"""
-        if self.preco_pricing is None and self.preco_buybox is None:
-            raise ValidationError("Informe pelo menos preco_pricing ou preco_buybox")
-        
-        if self.preco_pricing is not None and self.preco_pricing < 0:
-            raise ValidationError("preco_pricing não pode ser negativo")
-        
-        if self.preco_buybox is not None and self.preco_buybox < 0:
-            raise ValidationError("preco_buybox não pode ser negativo")
-        
-        return self
-
 class ProdutosMonitorados(Schema):
     ean: str
     descricao: str
+
+# =================== HELPERS ===================
+
+def normalizar_loja(nome: str) -> str:
+    if not nome:
+        return "sem_loja"
+    nome = re.sub(r'[àáâãäå]', 'a', nome)
+    nome = re.sub(r'[èéêë]', 'e', nome)
+    nome = re.sub(r'[ìíîï]', 'i', nome)
+    nome = re.sub(r'[òóôõö]', 'o', nome)
+    nome = re.sub(r'[ùúûü]', 'u', nome)
+    nome = re.sub(r'[ç]', 'c', nome)
+    return re.sub(r'[^a-z0-9]', '', nome.lower())
 
 # =================== ENDPOINT NINJA ===================
 
@@ -337,24 +329,21 @@ def get_monitored_products(request):
     """
     Retorna lista de produtos monitorados (únicos por EAN),
     apenas com EAN e descrição.
-    Remove duplicatas mesmo que descrições sejam diferentes.
+    Deduplicação feita no banco via distinct() para melhor performance.
     """
+    from django.db.models import Min
 
-    produtos = ProductDetails.objects.filter(status="ativo").values("ean", "descricao")
+    resultado = (
+        ProductDetails.objects
+        .filter(status="ativo")
+        .values("ean")
+        .annotate(descricao=Min("descricao"))  # pega uma descrição por EAN no banco
+        .order_by("descricao")
+    )
 
-    # 🔹 Elimina duplicatas manualmente
-    vistos = {}
-    for p in produtos:
-        ean = p["ean"]
-        if ean not in vistos:
-            vistos[ean] = p["descricao"]
+    logger.info("Retornados %d produtos únicos por EAN.", len(resultado))
 
-    resultado = [{"ean": ean, "descricao": desc} for ean, desc in vistos.items()]
-    resultado.sort(key=lambda x: x["descricao"].lower())
-
-    logger.info(f"Retornados {len(resultado)} produtos únicos por EAN.")
-
-    return resultado
+    return list(resultado)
 
 @api.get("/products/{ean}/melhor_oferta", response=Dict[str, Any])
 def get_lowest_price_by_marketplace(request, ean: str):
@@ -667,8 +656,8 @@ def get_urls(request):
     return ProductURL.objects.all()
 
 @api.get('products/', response=List[ProductDetailsOut])
-def get_products(request):
-    return ProductDetails.objects.all()
+def get_products(request, limit: int = 100, offset: int = 0):
+    return ProductDetails.objects.all().order_by('-data_hora')[offset:offset + limit]
 
 @api.get("/products/{ean}", response=List[ProductDetailsOut])
 def get_product_by_ean(request, ean: str):
@@ -694,34 +683,33 @@ def get_product_by_ean(request, ean: str):
         logger.info(f"Nenhum produto ATIVO encontrado para o EAN: {ean}")
         return 404, {"detail": f"Nenhum produto ativo encontrado para o EAN {ean}"}
 
-    results = []
-    for product in queryset:
-        # URL principal do produto (do ProductURL)
-        product_url_obj = ProductURL.objects.filter(ean=ean).first()
-        url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
+    product_url_obj = ProductURL.objects.filter(ean=ean).first()
+    base_url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
 
-        results.append(
-            ProductDetailsOut(
-                ean=product.ean,
-                sku=product.sku,
-                loja=product.loja,
-                preco_final=product.preco_final,
-                data_hora=product.data_hora,
-                marketplace=product.marketplace,
-                change_price=product.change_price,
-                key_loja=product.key_loja,
-                key_sku=product.key_sku,
-                descricao=product.descricao,
-                review=product.review,
-                imagem=product.imagem,
-                status=product.status,  # sempre será "ativo"
-                preco_pricing=product.preco_pricing,
-                preco_buybox=product.preco_buybox,
-                url=url,
-                marca=product.marca,
-                categoria=product.categoria
-            )
+    results = [
+        ProductDetailsOut(
+            ean=product.ean,
+            sku=product.sku,
+            loja=product.loja,
+            preco_final=product.preco_final,
+            data_hora=product.data_hora,
+            marketplace=product.marketplace,
+            change_price=product.change_price,
+            key_loja=product.key_loja,
+            key_sku=product.key_sku,
+            descricao=product.descricao,
+            review=product.review,
+            imagem=product.imagem,
+            status=product.status,
+            preco_pricing=product.preco_pricing,
+            preco_buybox=product.preco_buybox,
+            url=base_url,
+            marca=product.marca,
+            categoria=product.categoria,
+            loja_normalizada=product.loja_normalizada,
         )
+        for product in queryset
+    ]
 
     logger.info(f"Retornando {len(results)} produto(s) ATIVO(S) para o EAN {ean}")
     return results
@@ -748,13 +736,13 @@ def get_price_changes(request, ean: Optional[str] = None, loja: Optional[str] = 
         ) for change in queryset
     ]
 
-@api.delete("/delproducts/")
+@api.delete("/delproducts/", response={200: dict, 500: ErrorResponse})
 def remove_all_products(request):
     try:
         logger.info("Iniciando exclusão de todos os produtos")
         count = ProductDetails.objects.all().delete()[0]
         logger.info(f"{count} produtos excluídos com sucesso")
-        return {"message": f"{count} produtos excluídos com sucesso"}
+        return 200, {"message": f"{count} produtos excluídos com sucesso"}
     except Exception as e:
         logger.error(f"Erro ao excluir produtos: {str(e)}")
         return 500, {"detail": f"Erro ao excluir produtos: {str(e)}"}
@@ -910,13 +898,14 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
         
         logger.info(f"{len(updated_products)} produtos atualizados com sucesso")
         
-        # Busca URLs para retornar na resposta
-        result = []
-        for product in updated_products:
-            product_url = ProductURL.objects.filter(ean=product.ean).first()
-            url = product_url.url if product_url else "https://via.placeholder.com/150"
-            
-            result.append(ProductDetailsOut(
+        eans = {p.ean for p in updated_products}
+        url_map = {
+            pu.ean: pu.url
+            for pu in ProductURL.objects.filter(ean__in=eans)
+        }
+
+        result = [
+            ProductDetailsOut(
                 ean=product.ean,
                 sku=product.sku,
                 key_sku=product.key_sku,
@@ -932,11 +921,14 @@ def update_precos(request, payload: List[UpdatePrecosSchema]):
                 status=product.status,
                 preco_pricing=product.preco_pricing,
                 preco_buybox=product.preco_buybox,
-                url=url,
+                url=url_map.get(product.ean, "https://via.placeholder.com/150"),
                 marca=product.marca,
-                categoria=product.categoria
-            ))
-        
+                categoria=product.categoria,
+                loja_normalizada=product.loja_normalizada,
+            )
+            for product in updated_products
+        ]
+
         return 200, result
         
     except Exception as e:
@@ -979,29 +971,18 @@ def create_products(request, products: List[ProductsDetailsIn]):
         logger.warning("Lista de produtos vazia recebida")
         return []
 
-    # === FUNÇÃO DE NORMALIZAÇÃO DE LOJA ===
-    def normalizar_loja(nome: str) -> str:
-        if not nome:
-            return "sem_loja"
-        import re
-        nome = re.sub(r'[àáâãäå]', 'a', nome)
-        nome = re.sub(r'[èéêë]', 'e', nome)
-        nome = re.sub(r'[ìíîï]', 'i', nome)
-        nome = re.sub(r'[òóôõö]', 'o', nome)
-        nome = re.sub(r'[ùúûü]', 'u', nome)
-        nome = re.sub(r'[ç]', 'c', nome)
-        return re.sub(r'[^a-z0-9]', '', nome.lower())
-
     ean = products[0].ean
     marketplace = products[0].marketplace
     
     logger.info(f"Processando {len(products)} produtos - EAN: {ean}, Marketplace: {marketplace}")
     
     # Buscar produtos existentes APENAS do mesmo EAN + MARKETPLACE
-    existing_sellers = ProductDetails.objects.filter(ean=ean, marketplace=marketplace)
+    existing_sellers = list(ProductDetails.objects.filter(ean=ean, marketplace=marketplace))
     existing_keys = {s.key_sku for s in existing_sellers}
     received_keys = {p.key_sku for p in products}
-    
+
+    existing_by_key = {s.key_sku: s for s in existing_sellers}
+
     logger.info(f"Produtos existentes no banco: {len(existing_keys)}")
     logger.info(f"Produtos recebidos na raspagem: {len(received_keys)}")
 
@@ -1011,13 +992,12 @@ def create_products(request, products: List[ProductsDetailsIn]):
             product_data = product.dict()
             product_data["preco_final"] = Decimal(str(product_data["preco_final"]))
             product_data["preco_pricing"] = (
-                Decimal(str(product_data["preco_pricing"])) 
-                if product_data.get("preco_pricing") not in [None, "", 0] 
+                Decimal(str(product_data["preco_pricing"]))
+                if product_data.get("preco_pricing") not in [None, "", 0]
                 else None
             )
             product_data["data_hora"] = timezone.now()
 
-            # === CALCULAR LOJA_NORMALIZADA ===
             product_data["loja_normalizada"] = normalizar_loja(product_data.get("loja"))
 
             logger.info(
@@ -1031,7 +1011,7 @@ def create_products(request, products: List[ProductsDetailsIn]):
             )
 
             # === DETECTAR MUDANÇA DE PREÇO ===
-            existing_product = ProductDetails.objects.filter(key_sku=product_data["key_sku"]).first()
+            existing_product = existing_by_key.get(product_data["key_sku"])
             if existing_product:
                 product_data["change_price"] = existing_product.change_price
                 if round(existing_product.preco_final, 2) != round(product_data["preco_final"], 2):
@@ -1090,27 +1070,23 @@ def create_products(request, products: List[ProductsDetailsIn]):
     # === INATIVAR PRODUTOS QUE NÃO VIERAM NA RASPAGEM ===
     current_time = timezone.now()
     inactivated_count = 0
-    
+
+    product_url_obj = ProductURL.objects.filter(ean=ean).first()
+    base_url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
+
+    to_inactivate = []
     for existing in existing_sellers:
         if existing.key_sku not in received_keys:
             existing.status = "inativo"
             existing.data_hora = current_time
-            existing.save()
-            
-            product_url = ProductURL.objects.filter(ean=existing.ean).first()
-            url = product_url.url if product_url else "https://via.placeholder.com/150"
-            created_products.append((existing, url))
+            to_inactivate.append(existing)
+            created_products.append((existing, base_url))
             inactivated_count += 1
-            
-            logger.info(
-                f"Produto inativado:\n"
-                f"- Seller: {existing.loja}\n"
-                f"- Loja Normalizada: {existing.loja_normalizada}\n"
-                f"- EAN: {existing.ean}\n"
-                f"- Key SKU: {existing.key_sku}\n"
-                f"- Marketplace: {existing.marketplace}\n"
-            )
-    
+
+    if to_inactivate:
+        ProductDetails.objects.bulk_update(to_inactivate, ['status', 'data_hora'])
+        logger.info(f"Inativados: {[p.key_sku for p in to_inactivate]}")
+
     logger.info(f"Resumo: {len(products)} ativos, {inactivated_count} inativados")
 
     # === RETORNAR RESPOSTA COM URL CORRETA ===
