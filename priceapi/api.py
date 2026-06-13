@@ -3,7 +3,7 @@ from ninja import NinjaAPI, ModelSchema, Schema
 from typing import List, Optional, Any, Dict
 from .models import ProductURL, ProductDetails, PriceChange
 from ninja.errors import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError
 from decimal import Decimal
 from datetime import datetime
 from django.utils import timezone
@@ -985,105 +985,103 @@ def create_products(request, products: List[ProductsDetailsIn]):
     created_products = []
 
     try:
-        with transaction.atomic():
-            # === PROCESSAR PRODUTOS RECEBIDOS ===
-            for product in products:
-                product_data = {}  # inicializa antes do try para garantir acesso no except
-                try:
-                    product_data = product.dict()
+        # === PROCESSAR PRODUTOS RECEBIDOS ===
+        for product in products:
+            product_data = {}
+            try:
+                product_data = product.dict()
 
-                    product_data["preco_final"] = Decimal(str(product_data["preco_final"]))
+                product_data["preco_final"] = Decimal(str(product_data["preco_final"]))
 
-                    # normaliza preco_pricing e preco_buybox: 0 / "" / None → None
-                    for field in ("preco_pricing", "preco_buybox"):
-                        val = product_data.get(field)
-                        product_data[field] = (
-                            Decimal(str(val)) if val not in [None, "", 0, 0.0] else None
-                        )
-
-                    product_data["data_hora"] = timezone.now()
-                    product_data["loja_normalizada"] = normalizar_loja(product_data.get("loja"))
-
-                    logger.info(
-                        f"Processando produto:\n"
-                        f"- Seller: {product_data['loja']}\n"
-                        f"- Loja Normalizada: {product_data['loja_normalizada']}\n"
-                        f"- EAN: {product_data['ean']}\n"
-                        f"- Key SKU: {product_data['key_sku']}\n"
-                        f"- Preço: R$ {product_data['preco_final']:.2f}\n"
-                        f"- Marketplace: {product_data['marketplace']}\n"
+                # normaliza preco_pricing e preco_buybox: 0 / "" / None → None
+                for field in ("preco_pricing", "preco_buybox"):
+                    val = product_data.get(field)
+                    product_data[field] = (
+                        Decimal(str(val)) if val not in [None, "", 0, 0.0] else None
                     )
 
-                    # === DETECTAR MUDANÇA DE PREÇO ===
-                    existing_product = existing_by_key.get(product_data["key_sku"])
-                    if existing_product:
-                        product_data["change_price"] = existing_product.change_price
-                        if round(existing_product.preco_final, 2) != round(product_data["preco_final"], 2):
-                            product_data["change_price"] += 1
-                            PriceChange.objects.create(
-                                ean=product_data["ean"],
-                                loja=product_data["loja"],
-                                key_loja=product_data["key_loja"],
-                                preco_final_antigo=existing_product.preco_final,
-                                preco_final_novo=product_data["preco_final"],
-                                timestamp=timezone.now(),
-                                url=product_data["url"],
-                                descricao=product_data["descricao"]
-                            )
-                            logger.info(
-                                f"Mudança de preço: {product_data['loja']} | "
-                                f"R$ {existing_product.preco_final:.2f} → R$ {product_data['preco_final']:.2f}"
-                            )
-                    else:
-                        product_data["change_price"] = 0
+                product_data["data_hora"] = timezone.now()
+                product_data["loja_normalizada"] = normalizar_loja(product_data.get("loja"))
+
+                logger.info(
+                    f"Processando produto:\n"
+                    f"- Seller: {product_data['loja']}\n"
+                    f"- Loja Normalizada: {product_data['loja_normalizada']}\n"
+                    f"- EAN: {product_data['ean']}\n"
+                    f"- Key SKU: {product_data['key_sku']}\n"
+                    f"- Preço: R$ {product_data['preco_final']:.2f}\n"
+                    f"- Marketplace: {product_data['marketplace']}\n"
+                )
+
+                # === DETECTAR MUDANÇA DE PREÇO ===
+                existing_product = existing_by_key.get(product_data["key_sku"])
+                if existing_product:
+                    product_data["change_price"] = existing_product.change_price
+                    if round(existing_product.preco_final, 2) != round(product_data["preco_final"], 2):
+                        product_data["change_price"] += 1
                         PriceChange.objects.create(
                             ean=product_data["ean"],
                             loja=product_data["loja"],
                             key_loja=product_data["key_loja"],
-                            preco_final_antigo=None,
+                            preco_final_antigo=existing_product.preco_final,
                             preco_final_novo=product_data["preco_final"],
                             timestamp=timezone.now(),
                             url=product_data["url"],
                             descricao=product_data["descricao"]
                         )
-
-                    # === SALVAR/ATUALIZAR PRODUTO ===
-                    product_data["status"] = "ativo"
-                    key_sku = product_data["key_sku"]
-                    # remove key_sku dos defaults para evitar conflito no update_or_create
-                    defaults = {k: v for k, v in product_data.items() if k != "key_sku"}
-                    new_product, _ = ProductDetails.objects.update_or_create(
-                        key_sku=key_sku,
-                        defaults=defaults
+                        logger.info(
+                            f"Mudança de preço: {product_data['loja']} | "
+                            f"R$ {existing_product.preco_final:.2f} → R$ {product_data['preco_final']:.2f}"
+                        )
+                else:
+                    product_data["change_price"] = 0
+                    PriceChange.objects.create(
+                        ean=product_data["ean"],
+                        loja=product_data["loja"],
+                        key_loja=product_data["key_loja"],
+                        preco_final_antigo=None,
+                        preco_final_novo=product_data["preco_final"],
+                        timestamp=timezone.now(),
+                        url=product_data["url"],
+                        descricao=product_data["descricao"]
                     )
-                    created_products.append((new_product, product_data["url"]))
 
-                except Exception as e:
-                    key = product_data.get("key_sku", "N/A")
-                    logger.error(f"Erro ao salvar produto {key}: {str(e)}")
-                    raise  # propaga para o transaction.atomic() fazer rollback
+                # === SALVAR/ATUALIZAR PRODUTO ===
+                product_data["status"] = "ativo"
+                key_sku = product_data["key_sku"]
+                defaults = {k: v for k, v in product_data.items() if k != "key_sku"}
+                new_product, _ = ProductDetails.objects.update_or_create(
+                    key_sku=key_sku,
+                    defaults=defaults
+                )
+                created_products.append((new_product, product_data["url"]))
 
-            # === INATIVAR PRODUTOS QUE NÃO VIERAM NA RASPAGEM ===
-            current_time = timezone.now()
-            product_url_obj = ProductURL.objects.filter(ean=ean).first()
-            base_url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
+            except Exception as e:
+                key = product_data.get("key_sku", "N/A")
+                logger.error(f"Erro ao salvar produto {key}: {str(e)}")
+                continue
 
-            to_inactivate = []
-            for existing in existing_sellers:
-                if existing.key_sku not in received_keys:
-                    existing.status = "inativo"
-                    existing.data_hora = current_time
-                    to_inactivate.append(existing)
-                    created_products.append((existing, base_url))
+        # === INATIVAR PRODUTOS QUE NÃO VIERAM NA RASPAGEM ===
+        current_time = timezone.now()
+        product_url_obj = ProductURL.objects.filter(ean=ean).first()
+        base_url = product_url_obj.url if product_url_obj else "https://via.placeholder.com/150"
 
-            if to_inactivate:
-                ProductDetails.objects.bulk_update(to_inactivate, ['status', 'data_hora'])
-                logger.info(f"Inativados: {[p.key_sku for p in to_inactivate]}")
+        to_inactivate = []
+        for existing in existing_sellers:
+            if existing.key_sku not in received_keys:
+                existing.status = "inativo"
+                existing.data_hora = current_time
+                to_inactivate.append(existing)
+                created_products.append((existing, base_url))
 
-            logger.info(f"Resumo: {len(products)} ativos, {len(to_inactivate)} inativados")
+        if to_inactivate:
+            ProductDetails.objects.bulk_update(to_inactivate, ['status', 'data_hora'])
+            logger.info(f"Inativados: {[p.key_sku for p in to_inactivate]}")
+
+        logger.info(f"Resumo: {len(products)} ativos, {len(to_inactivate)} inativados")
 
     except Exception as e:
-        logger.error(f"Erro no processamento — rollback executado: {str(e)}")
+        logger.error(f"Erro no processamento: {str(e)}")
         return 422, {"detail": f"Erro ao salvar produtos: {str(e)}"}
 
     # === RETORNAR RESPOSTA ===
